@@ -36,7 +36,24 @@ Legend: **ran** = executed here and passed; **skipped** = cannot run here;
 | engine | argument construction (argv array) | 2 | ran |
 | engine | timeout marks command timed_out | 2 | ran |
 | engine | checkpoint/restore option defaults | 2 | ran |
-| manifest | round-trip / corruption / traversal | 3 | pending |
+| manifest | round-trip / corruption / traversal | 3 | ran |
+| format | valid manifest passes strict validation | 3 | ran |
+| format | manifest JSON round-trip | 3 | ran |
+| format | unsupported version rejected | 3 | ran |
+| format | missing/tampered integrity rejected | 3 | ran |
+| format | path traversal / absolute path rejected | 3 | ran |
+| format | duplicate artifact path rejected | 3 | ran |
+| format | incomplete chunk map rejected | 3 | ran |
+| format | chunk out-of-bounds / zero-length rejected | 3 | ran |
+| format | non-hex chunk id rejected | 3 | ran |
+| format | missing chunk in store rejected | 3 | ran |
+| format | self-parent and cyclic parents rejected | 3 | ran |
+| format | snapshot-id / artifact-path rules | 3 | ran |
+| format | atomic publish + refuse-overwrite | 3 | ran |
+| format | publish rejects invalid staged manifest | 3 | ran |
+| format | property tests (coverage, digest stability) | 3 | ran |
+| format | CLI inspect/verify end-to-end (binary) | 3 | ran |
+| format | CLI verify fails on tamper / missing chunk | 3 | ran |
 | storage | chunk boundaries, hashing, dedup | 4 | pending |
 | storage | concurrent writes, resource limits | 4 | pending |
 | transfer | retries, cancellation, atomic publish | 5 | pending |
@@ -53,10 +70,15 @@ cargo run -p snapforge-cli -- workload --kind cpu-memory \
 cargo run -p snapforge-cli -- workload --kind cpu-memory \
     --memory-mib 16 --threads 2 --validate --state-file /tmp/sf.json
 
+# Format layer: build a fixture, then inspect and verify it.
+cargo run -p snapforge-format --example make_fixture -- /tmp/sf-store
+cargo run -p snapforge-cli -- --store /tmp/sf-store inspect fixture-1
+cargo run -p snapforge-cli -- --store /tmp/sf-store verify fixture-1 --require-chunks
+
 # On a host WITHOUT CONFIG_CHECKPOINT_RESTORE these must fail with an explicit
 # capability message (exit 1) and produce no artifacts:
 cargo run -p snapforge-cli -- checkpoint --pid $$ --output /tmp/sf-ckpt
 cargo run -p snapforge-cli -- restore --input /tmp/sf-ckpt
 ```
 
-Total automated tests: **31** (13 core, 11 engine unit, 7 engine integration).
+Total automated tests: **59** (13 core, 18 engine, 24 format, 4 CLI integration).

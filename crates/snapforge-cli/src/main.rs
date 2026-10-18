@@ -7,6 +7,7 @@ use snapforge_core::config::DEFAULT_CONCURRENCY;
 use snapforge_core::{host, Config, DEFAULT_STORE_DIR};
 use snapforge_engine::engine::{CheckpointOptions, RestoreOptions};
 use snapforge_engine::Engine;
+use snapforge_format::{FormatError, ValidateOptions};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -100,10 +101,20 @@ enum Command {
     },
 
     /// Inspect a stored snapshot manifest.
-    Inspect { snapshot: String },
+    Inspect {
+        /// Snapshot id, or a path to a snapshot directory.
+        snapshot: String,
+    },
 
     /// Verify snapshot artifacts and integrity.
-    Verify { snapshot: String },
+    Verify {
+        /// Snapshot id, or a path to a snapshot directory.
+        snapshot: String,
+
+        /// Also require all referenced chunks to be present in the CAS store.
+        #[arg(long, default_value_t = false)]
+        require_chunks: bool,
+    },
 
     /// Store checkpoint artifacts into content-addressed storage.
     Store { source: PathBuf },
@@ -190,8 +201,11 @@ fn main() -> anyhow::Result<()> {
             leave_running,
             timeout_secs,
         } => run_checkpoint(&cfg, pid, output, leave_running, timeout_secs),
-        Command::Inspect { .. } => not_implemented("inspect", 3),
-        Command::Verify { .. } => not_implemented("verify", 3),
+        Command::Inspect { snapshot } => run_inspect(&cfg, &snapshot),
+        Command::Verify {
+            snapshot,
+            require_chunks,
+        } => run_verify(&cfg, &snapshot, require_chunks),
         Command::Store { .. } => not_implemented("store", 4),
         Command::Transfer { .. } => not_implemented("transfer", 5),
         Command::Restore {
@@ -309,6 +323,148 @@ fn run_status(cfg: &Config, pid: Option<i32>) -> anyhow::Result<()> {
 }
 
 /// Turn an engine capability error into an actionable message.
+/// Resolve a snapshot argument to a directory: either an id within the store,
+/// or an existing path.
+fn resolve_snapshot(cfg: &Config, arg: &str) -> PathBuf {
+    let as_path = PathBuf::from(arg);
+    if as_path.is_dir() {
+        return as_path;
+    }
+    cfg.snapshots_dir().join(arg)
+}
+
+fn run_inspect(cfg: &Config, snapshot: &str) -> anyhow::Result<()> {
+    let dir = resolve_snapshot(cfg, snapshot);
+    let manifest = snapforge_format::load(&dir)
+        .map_err(|e| anyhow::anyhow!("failed to load snapshot at {}: {e}", dir.display()))?;
+
+    // Inspect reports structure but does not fail on a missing integrity digest;
+    // it validates everything else so operators can see what is wrong.
+    let opts = ValidateOptions {
+        check_integrity: false,
+        available_chunks: None,
+    };
+    let validation = snapforge_format::validate(&manifest, &opts);
+
+    if cfg.json {
+        let (valid, err) = match &validation {
+            Ok(_) => (true, None),
+            Err(e) => (false, Some(e.to_string())),
+        };
+        let out = serde_json::json!({
+            "path": dir.display().to_string(),
+            "manifest": manifest,
+            "valid": valid,
+            "error": err,
+        });
+        println!("{}", serde_json::to_string_pretty(&out)?);
+    } else {
+        println!("snapshot:   {}", manifest.snapshot_id);
+        println!("path:       {}", dir.display());
+        println!("format:     v{}", manifest.format_version);
+        println!("captured:   {}", manifest.captured_at);
+        println!("workload:   {}", manifest.workload.id);
+        println!(
+            "compat:     arch={} kernel={} criu={}",
+            manifest.compatibility.arch,
+            manifest.compatibility.kernel_release,
+            manifest
+                .compatibility
+                .criu_version
+                .as_deref()
+                .unwrap_or("?")
+        );
+        if let Some(p) = &manifest.parent {
+            println!("parent:     {p}");
+        }
+        println!("artifacts:  {}", manifest.artifacts.len());
+        println!("total bytes:{}", manifest.total_bytes());
+        let s = &manifest.stats;
+        println!(
+            "chunks:     distinct={} refs={} dedup_saved={}",
+            s.distinct_chunks, s.total_chunk_refs, s.dedup_saved_bytes
+        );
+        println!(
+            "integrity:  {}",
+            manifest.integrity.as_deref().unwrap_or("<missing>")
+        );
+        match &validation {
+            Ok(_) => println!("validation: OK"),
+            Err(e) => println!("validation: FAILED ({e})"),
+        }
+    }
+
+    if validation.is_err() {
+        anyhow::bail!("snapshot manifest failed validation");
+    }
+    Ok(())
+}
+
+fn run_verify(cfg: &Config, snapshot: &str, require_chunks: bool) -> anyhow::Result<()> {
+    let dir = resolve_snapshot(cfg, snapshot);
+    let manifest = snapforge_format::load(&dir)
+        .map_err(|e| anyhow::anyhow!("failed to load snapshot at {}: {e}", dir.display()))?;
+
+    let available = if require_chunks {
+        Some(collect_cas_chunks(cfg))
+    } else {
+        None
+    };
+
+    let opts = ValidateOptions {
+        check_integrity: true,
+        available_chunks: available,
+    };
+
+    match snapforge_format::validate(&manifest, &opts) {
+        Ok(_) => {
+            if cfg.json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "snapshot": manifest.snapshot_id,
+                        "valid": true,
+                    }))?
+                );
+            } else {
+                println!("{}: OK", manifest.snapshot_id);
+            }
+            Ok(())
+        }
+        Err(e) => {
+            if cfg.json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "snapshot": manifest.snapshot_id,
+                        "valid": false,
+                        "error": e.to_string(),
+                    }))?
+                );
+            }
+            Err(match e {
+                FormatError::IntegrityMismatch { .. } => {
+                    anyhow::anyhow!("integrity check failed for {}", manifest.snapshot_id)
+                }
+                other => anyhow::anyhow!("verification failed: {other}"),
+            })
+        }
+    }
+}
+
+/// List chunk ids present in the content-addressed store (by file name).
+fn collect_cas_chunks(cfg: &Config) -> std::collections::BTreeSet<String> {
+    let mut set = std::collections::BTreeSet::new();
+    if let Ok(rd) = std::fs::read_dir(cfg.cas_dir()) {
+        for entry in rd.flatten() {
+            if let Some(name) = entry.file_name().to_str() {
+                set.insert(name.to_string());
+            }
+        }
+    }
+    set
+}
+
 fn capability_hint(e: snapforge_engine::EngineError) -> anyhow::Error {
     if e.is_capability_block() {
         anyhow::anyhow!(

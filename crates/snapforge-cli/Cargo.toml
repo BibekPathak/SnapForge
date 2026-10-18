@@ -18,3 +18,8 @@ serde_json.workspace = true
 tracing.workspace = true
 snapforge-core.workspace = true
 snapforge-engine.workspace = true
+snapforge-format.workspace = true
+
+[dev-dependencies]
+blake3.workspace = true
+tempfile = "3.20.0"

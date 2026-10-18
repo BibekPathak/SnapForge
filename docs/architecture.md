@@ -126,9 +126,38 @@ Real capture/restore cannot run on the development host (see
 `docs/compatibility.md`); the engine's control flow is therefore verified with
 controllable fake CRIU binaries plus an explicit runtime capability gate.
 
+## Phase 3 components
+
+### `snapforge-format` (versioned manifest + atomic publication)
+
+`snapforge-format` defines the immutable, versioned snapshot manifest and the
+rules for validating and publishing it. It is storage-agnostic: the
+content-addressed chunk identity it defines (`ChunkRef { id, length }`, where
+`id` is a BLAKE3 hex digest) is what `snapforge-storage` implements in Phase 4.
+
+Modules:
+
+- `manifest` — the data model (`Manifest`, `Artifact`, `ChunkRef`,
+  `Compatibility`, `SnapshotStats`), the `FORMAT_VERSION`, `Manifest::sealed`
+  (compute the integrity digest), and helpers such as `chunk_lengths`.
+- `validate` — `validate(&Manifest, &ValidateOptions) -> ValidManifest`,
+  rejecting unsupported versions, path traversal/absolute paths, duplicate
+  artifacts, bad chunk ids/lengths, incomplete maps, unknown chunks, missing or
+  mismatched integrity, and self/cyclic parents. `detect_parent_cycle` walks a
+  parent chain with a bounded iteration cap.
+- `store` — manifest (de)serialization and **atomic publication**:
+  stage → validate → refuse-overwrite → `rename(2)`.
+
+The `ValidManifest` newtype is the only way to assert a manifest has passed
+structural validation, which keeps untrusted-input handling explicit.
+
+Publication is never partial: a snapshot is validated in a staging directory
+and only then renamed into place; an existing snapshot id is never overwritten.
+See `docs/snapshot-format.md` for the field-by-field schema, the informational
+vs restore-critical distinction, and the full validation rule list.
+
 ## Later phases (planned)
 
-- **Format**: immutable versioned manifest, strict validation, atomic publish.
 - **Storage**: streaming chunker, BLAKE3 content-addressing, dedup, bounded
   parallel writes with backpressure and a documented memory budget.
 - **Transfer**: parallel, retrying, cancellable, integrity-verified local copy

@@ -1,0 +1,21 @@
+[package]
+name = "snapforge-format"
+description = "Versioned, validated snapshot manifest format with atomic publication."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+blake3.workspace = true
+snapforge-core.workspace = true
+
+[dev-dependencies]
+tempfile = "3.20.0"
+proptest = "1.6.0"
+anyhow = "1.0.98"

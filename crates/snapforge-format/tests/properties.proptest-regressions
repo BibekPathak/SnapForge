@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 84f0b85ad9d36b69fc136caba6140549e220b65c96934911f74a9b326e1677d8 # shrinks to m = Manifest { format_version: 1, snapshot_id: "aa0a", parent: None, workload: WorkloadInfo { id: "prop", description: None }, captured_at: "2026-01-01T00:00:00Z", compatibility: Compatibility { arch: "x86_64", kernel_release: "test", criu_version: None, criu_image_version: None }, artifacts: [Artifact { path: "a0-artifact-343.img", size: 1, chunks: [ChunkRef { id: "dc1b2892df9d30557b74174ec58ebf7510af2ce952d2df4b31a4bcedff43c835", length: 1 }] }, Artifact { path: "a1-artifact-343.img", size: 2, chunks: [ChunkRef { id: "dc1b2892df9d30557b74174ec58ebf7510af2ce952d2df4b31a4bcedff43c835", length: 2 }] }], stats: SnapshotStats { total_bytes: 3, distinct_chunks: 1, total_chunk_refs: 2, dedup_saved_bytes: 0, capture_duration_ms: None, packaging_duration_ms: None }, integrity: Some("3ee0009e665c8b545ac132782074f960ff652a5123d99bfb89a93e8daae1d6dd") }
