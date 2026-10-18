@@ -206,9 +206,39 @@ window) representative figures are: chunking ~1.0–1.1 GiB/s, BLAKE3 hashing
 ~1.2–2.5 GiB/s, and end-to-end ingest (1 MiB chunks, concurrency 4) ~660 MiB/s.
 These are indicative only; the full, repeated benchmark suite is Phase 7.
 
+## Phase 5 components
+
+### `snapforge-storage::transfer` (local snapshot transfer)
+
+Transfers copy a snapshot's manifest and all referenced chunks from one store to
+another (local filesystem). The module guarantees, and its tests assert:
+
+1. **Bounded concurrency.** A `Semaphore` caps in-flight chunk copies at
+   `concurrency`; each worker copies exactly one chunk at a time.
+2. **Integrity.** Source chunks are read through the CAS (which verifies their
+   content id), the destination copy is re-verified, and a length check catches
+   truncated reads.
+3. **Idempotent retries.** Chunks already present and valid at the destination
+   are skipped, so a re-run resumes cheaply. A completed re-run of the same
+   snapshot is a no-op that reports `chunks_skipped == chunks_total`.
+4. **Retries with backoff.** Transient per-chunk failures are retried up to
+   `max_retries` with exponential backoff.
+5. **Cancellation.** A `CancellationToken` (shared atomically) is checked before
+   start, between chunks, and inside the retry loop; the first error cancels
+   remaining work.
+6. **Atomic destination publication.** All chunks are copied first, then the
+   staging manifest is validated against the destination CAS, then the snapshot
+   directory is `rename`d into place. A conflicting destination snapshot is
+   refused (never silently replaced).
+7. **Bounded memory.** Each worker holds at most one chunk.
+
+The implementation is local-only for now, which keeps it fully testable without
+any cloud account. An HTTP-backed adapter can be added later behind the same
+interface. Larger end-to-end transfer benchmarks (cold/warm cache, chunk size,
+concurrency) are Phase 7.
+
 ## Later phases (planned)
-- **Transfer**: parallel, retrying, cancellable, integrity-verified local copy
-  with atomic destination publication.
+
 - **Incremental**: content-addressed reuse across compatible captures, with
   explicit parent dependencies; documented as a storage-layer experiment.
 - **Benchmarks**: Python harness distinguishing capture, packaging, transfer,

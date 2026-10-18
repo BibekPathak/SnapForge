@@ -6,12 +6,12 @@ SnapForge orchestrates **CRIU**-based process checkpoint/restore and adds a
 versioned snapshot format, content-addressed chunk storage, a bounded parallel
 transfer pipeline, and a reproducible benchmark harness.
 
-> **Status: Phase 4 complete.** The workspace, `snapforge doctor`, the
+> **Status: Phase 5 complete.** The workspace, `snapforge doctor`, the
 > deterministic workload harness, the CRIU orchestration engine
 > (`checkpoint`, `restore`, `status`), the versioned snapshot format
-> (`inspect`, `verify`), and the content-addressed storage pipeline
-> (`store`, dedup, bounded concurrency) are implemented and tested. Transfer,
-> incremental, and benchmark phases follow.
+> (`inspect`, `verify`), the content-addressed storage pipeline (`store`), and
+> reliable local snapshot transfer (`transfer`) are implemented and tested.
+> Incremental and benchmark phases follow.
 
 ## Design principle
 
@@ -65,6 +65,10 @@ cargo run --release -p snapforge-cli -- --store /tmp/sf-store verify ckpt-1 --re
 
 # Storage-layer microbenchmarks.
 cargo bench -p snapforge-storage
+
+# Transfer a snapshot between local stores (re-running is an idempotent no-op).
+cargo run --release -p snapforge-cli -- --store /tmp/sf-store transfer ckpt-1 /tmp/sf-store-b
+cargo run --release -p snapforge-cli -- --store /tmp/sf-store-b verify ckpt-1 --require-chunks
 ```
 
 On a host that cannot run CRIU, `checkpoint`/`restore` fail with an explicit
@@ -78,7 +82,7 @@ crates/
   snapforge-core      errors, config, logging, host probing, workload harness
   snapforge-engine    CRIU orchestration (checkpoint, restore, status, gating)
   snapforge-format    versioned manifest, validation, atomic publication
-  snapforge-storage   streaming chunker, content-addressed store, pipeline
+  snapforge-storage   streaming chunker, content-addressed store, pipeline, transfer
   snapforge-cli       the `snapforge` binary
 workloads/
   cpu-memory/         CPU + anonymous-memory workload

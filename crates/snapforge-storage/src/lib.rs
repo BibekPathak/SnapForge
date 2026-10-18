@@ -15,8 +15,12 @@ pub mod cas;
 pub mod chunker;
 pub mod error;
 pub mod pipeline;
+pub mod transfer;
 
 pub use cas::Cas;
 pub use chunker::{hash_chunk, Chunk, Chunker};
 pub use error::{Result, StorageError};
 pub use pipeline::{store_reader, IngestStats, IngestedArtifact, PipelineOptions};
+pub use transfer::{
+    transfer_snapshot, CancellationToken, TransferOptions, TransferOutcome, TransferProgress,
+};

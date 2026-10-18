@@ -135,8 +135,22 @@ enum Command {
         parent: Option<String>,
     },
 
-    /// Transfer a snapshot to another store.
-    Transfer { snapshot: String, dest: PathBuf },
+    /// Transfer a snapshot to another store (local filesystem).
+    Transfer {
+        /// Snapshot id in the source store.
+        snapshot: String,
+
+        /// Destination store directory.
+        dest: PathBuf,
+
+        /// Maximum chunk copies in flight.
+        #[arg(long)]
+        transfer_concurrency: Option<usize>,
+
+        /// Maximum retry attempts per chunk.
+        #[arg(long, default_value_t = 3)]
+        max_retries: u32,
+    },
 
     /// Restore a process from a checkpoint (requires a CRIU-capable host).
     Restore {
@@ -228,7 +242,12 @@ fn main() -> anyhow::Result<()> {
             workload,
             parent,
         } => run_store(&cfg, &source, id, workload, parent),
-        Command::Transfer { .. } => not_implemented("transfer", 5),
+        Command::Transfer {
+            snapshot,
+            dest,
+            transfer_concurrency,
+            max_retries,
+        } => run_transfer(&cfg, &snapshot, &dest, transfer_concurrency, max_retries),
         Command::Restore {
             input,
             timeout_secs,
@@ -648,6 +667,86 @@ fn now_rfc3339() -> String {
     let mth = if mp < 10 { mp + 3 } else { mp - 9 };
     let year = if mth <= 2 { y + 1 } else { y };
     format!("{year:04}-{mth:02}-{d:02}T{h:02}:{m:02}:{s:02}Z")
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_transfer(
+    cfg: &Config,
+    snapshot: &str,
+    dest: &std::path::Path,
+    transfer_concurrency: Option<usize>,
+    max_retries: u32,
+) -> anyhow::Result<()> {
+    // Source layout is the current store.
+    let source_snapshots = cfg.snapshots_dir();
+    if !source_snapshots.join(snapshot).is_dir() {
+        anyhow::bail!(
+            "snapshot `{snapshot}` not found under {}",
+            source_snapshots.display()
+        );
+    }
+
+    // Destination layout mirrors Config's structure.
+    let dest_cas_dir = dest.join("cas");
+    let dest_snapshots = dest.join("snapshots");
+    let dest_staging = dest.join("staging");
+    for d in [&dest_cas_dir, &dest_snapshots, &dest_staging] {
+        std::fs::create_dir_all(d).map_err(|e| anyhow::anyhow!("creating {}: {e}", d.display()))?;
+    }
+
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(async {
+        let source_cas = std::sync::Arc::new(
+            snapforge_storage::Cas::open(cfg.cas_dir())
+                .map_err(|e| anyhow::anyhow!("opening source CAS: {e}"))?,
+        );
+        let dest_cas = std::sync::Arc::new(
+            snapforge_storage::Cas::open(&dest_cas_dir)
+                .map_err(|e| anyhow::anyhow!("opening destination CAS: {e}"))?,
+        );
+
+        let opts = snapforge_storage::TransferOptions {
+            concurrency: transfer_concurrency.unwrap_or(cfg.concurrency),
+            max_retries,
+            ..snapforge_storage::TransferOptions::default()
+        };
+
+        let outcome = snapforge_storage::transfer_snapshot(
+            source_cas,
+            &source_snapshots,
+            dest_cas,
+            &dest_snapshots,
+            &dest_staging,
+            snapshot,
+            opts,
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("transfer failed: {e}"))?;
+
+        if cfg.json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "snapshot": outcome.snapshot_id,
+                    "destination": outcome.destination.display().to_string(),
+                    "chunks_total": outcome.chunks_total,
+                    "chunks_copied": outcome.chunks_copied,
+                    "chunks_skipped": outcome.chunks_skipped,
+                    "bytes_transferred": outcome.bytes_transferred,
+                    "retries": outcome.retries,
+                }))?
+            );
+        } else {
+            println!("transferred snapshot: {}", outcome.snapshot_id);
+            println!("  destination:     {}", outcome.destination.display());
+            println!("  chunks total:    {}", outcome.chunks_total);
+            println!("  chunks copied:   {}", outcome.chunks_copied);
+            println!("  chunks skipped:  {}", outcome.chunks_skipped);
+            println!("  bytes copied:    {}", outcome.bytes_transferred);
+            println!("  retries:         {}", outcome.retries);
+        }
+        Ok::<(), anyhow::Error>(())
+    })
 }
 
 fn capability_hint(e: snapforge_engine::EngineError) -> anyhow::Error {

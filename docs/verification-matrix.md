@@ -68,6 +68,15 @@ Legend: **ran** = executed here and passed; **skipped** = cannot run here;
 | storage | varied chunk sizes reassemble | 4 | ran |
 | storage | property tests (round-trip, accounting) | 4 | ran |
 | storage | CLI store/dedup/verify end-to-end | 4 | ran |
+| transfer | copies all chunks + publishes | 5 | ran |
+| transfer | idempotent re-run is a no-op | 5 | ran |
+| transfer | skips chunks already at destination | 5 | ran |
+| transfer | fails on missing source chunk | 5 | ran |
+| transfer | cancellation is prompt | 5 | ran |
+| transfer | concurrency bounded, correct | 5 | ran |
+| transfer | refuses conflicting destination | 5 | ran |
+| transfer | rejects zero concurrency | 5 | ran |
+| transfer | CLI transfer + rerun + missing source | 5 | ran |
 | storage | chunk boundaries, hashing, dedup | 4 | ran |
 | storage | concurrent writes, resource limits | 4 | ran |
 | transfer | retries, cancellation, atomic publish | 5 | pending |
@@ -97,10 +106,14 @@ cargo run -p snapforge-cli -- --store /tmp/sf-store4 verify ckpt-1 --require-chu
 # Microbenchmarks (storage layer).
 cargo bench -p snapforge-storage
 
+# Transfer a snapshot between local stores (second run is an idempotent no-op).
+cargo run -p snapforge-cli -- --store /tmp/sf-store4 transfer ckpt-1 /tmp/sf-store4b
+cargo run -p snapforge-cli -- --store /tmp/sf-store4b verify ckpt-1 --require-chunks
+
 # On a host WITHOUT CONFIG_CHECKPOINT_RESTORE these must fail with an explicit
 # capability message (exit 1) and produce no artifacts:
 cargo run -p snapforge-cli -- checkpoint --pid $$ --output /tmp/sf-ckpt
 cargo run -p snapforge-cli -- restore --input /tmp/sf-ckpt
 ```
 
-Total automated tests: **85** (13 core, 18 engine, 24 format, 22 storage, 8 CLI integration).
+Total automated tests: **104** (13 core, 18 engine, 24 format, 35 storage, 14 CLI integration).
