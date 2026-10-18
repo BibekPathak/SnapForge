@@ -17,3 +17,4 @@ clap.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
 snapforge-core.workspace = true
+snapforge-engine.workspace = true

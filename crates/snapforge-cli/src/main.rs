@@ -5,6 +5,8 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand, ValueEnum};
 use snapforge_core::config::DEFAULT_CONCURRENCY;
 use snapforge_core::{host, Config, DEFAULT_STORE_DIR};
+use snapforge_engine::engine::{CheckpointOptions, RestoreOptions};
+use snapforge_engine::Engine;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -80,10 +82,21 @@ enum Command {
 
     /// Capture a process checkpoint using CRIU (requires a CRIU-capable host).
     Checkpoint {
+        /// PID of the process to checkpoint.
         #[arg(long)]
-        pid: Option<i32>,
+        pid: i32,
+
+        /// Directory to receive the CRIU image files.
         #[arg(long)]
-        workload: Option<String>,
+        output: PathBuf,
+
+        /// Do not leave the target process running after capture.
+        #[arg(long, default_value_t = false)]
+        leave_running: bool,
+
+        /// Operation timeout in seconds (0 disables the timeout).
+        #[arg(long, default_value_t = 120)]
+        timeout_secs: u64,
     },
 
     /// Inspect a stored snapshot manifest.
@@ -99,7 +112,22 @@ enum Command {
     Transfer { snapshot: String, dest: PathBuf },
 
     /// Restore a process from a checkpoint (requires a CRIU-capable host).
-    Restore { snapshot: String },
+    Restore {
+        /// Directory containing the CRIU image files.
+        #[arg(long)]
+        input: PathBuf,
+
+        /// Operation timeout in seconds (0 disables the timeout).
+        #[arg(long, default_value_t = 120)]
+        timeout_secs: u64,
+    },
+
+    /// Report process and checkpoint readiness status.
+    Status {
+        /// Optional process ID to inspect via /proc.
+        #[arg(long)]
+        pid: Option<i32>,
+    },
 
     /// List stored snapshots.
     List,
@@ -156,12 +184,21 @@ fn main() -> anyhow::Result<()> {
         } => run_workload(
             kind, memory_mib, threads, iterations, files, file_mib, validate, state_file,
         ),
-        Command::Checkpoint { .. } => not_implemented("checkpoint", 2),
+        Command::Checkpoint {
+            pid,
+            output,
+            leave_running,
+            timeout_secs,
+        } => run_checkpoint(&cfg, pid, output, leave_running, timeout_secs),
         Command::Inspect { .. } => not_implemented("inspect", 3),
         Command::Verify { .. } => not_implemented("verify", 3),
         Command::Store { .. } => not_implemented("store", 4),
         Command::Transfer { .. } => not_implemented("transfer", 5),
-        Command::Restore { .. } => not_implemented("restore", 2),
+        Command::Restore {
+            input,
+            timeout_secs,
+        } => run_restore(&cfg, input, timeout_secs),
+        Command::Status { pid } => run_status(&cfg, pid),
         Command::List => not_implemented("list", 3),
         Command::Bench { .. } => not_implemented("bench", 4),
     }
@@ -177,6 +214,112 @@ fn run_doctor(cfg: &Config) -> anyhow::Result<()> {
     // Doctor is a diagnostic; a missing CRIU/kernel feature is reported but is
     // not an error exit, so scripts can still inspect the environment.
     Ok(())
+}
+
+fn timeout_from_secs(secs: u64) -> Option<std::time::Duration> {
+    if secs == 0 {
+        None
+    } else {
+        Some(std::time::Duration::from_secs(secs))
+    }
+}
+
+fn run_checkpoint(
+    cfg: &Config,
+    pid: i32,
+    output: PathBuf,
+    leave_running: bool,
+    timeout_secs: u64,
+) -> anyhow::Result<()> {
+    let mut engine = Engine::new().map_err(capability_hint)?;
+
+    let mut opts = CheckpointOptions::new(pid, &output);
+    opts.leave_running = leave_running;
+    opts.timeout = timeout_from_secs(timeout_secs);
+
+    let outcome = engine.checkpoint(&opts).map_err(capability_hint)?;
+
+    if cfg.json {
+        println!("{}", serde_json::to_string_pretty(&outcome)?);
+    } else {
+        println!(
+            "checkpoint captured: pid={} dir={} artifacts={} bytes={} duration_ms={}",
+            outcome.pid,
+            outcome.output_dir.display(),
+            outcome.artifact_count,
+            outcome.total_bytes,
+            outcome.duration_ms
+        );
+        if let Some(v) = &outcome.criu_version {
+            println!("criu version: {v}");
+        }
+    }
+    Ok(())
+}
+
+fn run_restore(cfg: &Config, input: PathBuf, timeout_secs: u64) -> anyhow::Result<()> {
+    let mut engine = Engine::new().map_err(capability_hint)?;
+
+    let mut opts = RestoreOptions::new(&input);
+    opts.timeout = timeout_from_secs(timeout_secs);
+
+    let outcome = engine.restore(&opts).map_err(capability_hint)?;
+
+    if cfg.json {
+        println!("{}", serde_json::to_string_pretty(&outcome)?);
+    } else {
+        println!(
+            "restore succeeded: dir={} duration_ms={}",
+            outcome.input_dir.display(),
+            outcome.duration_ms
+        );
+    }
+    Ok(())
+}
+
+fn run_status(cfg: &Config, pid: Option<i32>) -> anyhow::Result<()> {
+    let report = host::probe();
+    match pid {
+        Some(pid) => {
+            // Process status does not require CRIU.
+            let status = snapforge_engine::engine::status_of(pid);
+            if cfg.json {
+                println!("{}", serde_json::to_string_pretty(&status)?);
+            } else if status.exists {
+                println!(
+                    "pid {}: state={} name={} threads={}",
+                    pid,
+                    status.state.as_deref().unwrap_or("?"),
+                    status.name.as_deref().unwrap_or("?"),
+                    status.threads.unwrap_or(0)
+                );
+            } else {
+                println!("pid {pid}: not found");
+            }
+        }
+        None => {
+            if cfg.json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                println!("criu readiness: {:?}", report.criu_readiness);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Turn an engine capability error into an actionable message.
+fn capability_hint(e: snapforge_engine::EngineError) -> anyhow::Error {
+    if e.is_capability_block() {
+        anyhow::anyhow!(
+            "{e}\n\
+             hint: run `snapforge doctor` for details. Real checkpoint/restore needs a kernel \
+             built with CONFIG_CHECKPOINT_RESTORE, the ns_last_pid sysctl, a criu binary, and \
+             root or CAP_SYS_PTRACE. SnapForge never fabricates checkpoint data."
+        )
+    } else {
+        anyhow::anyhow!(e)
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

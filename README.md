@@ -6,9 +6,10 @@ SnapForge orchestrates **CRIU**-based process checkpoint/restore and adds a
 versioned snapshot format, content-addressed chunk storage, a bounded parallel
 transfer pipeline, and a reproducible benchmark harness.
 
-> **Status: Phase 1 complete.** The workspace, `snapforge doctor`, and the
-> deterministic workload harness are implemented, tested, and buildable.
-> Snapshot format, storage, transfer, incremental, and benchmark phases follow.
+> **Status: Phase 2 complete.** The workspace, `snapforge doctor`, the
+> deterministic workload harness, and the CRIU orchestration engine
+> (`checkpoint`, `restore`, `status`) are implemented and tested. Snapshot
+> format, storage, transfer, incremental, and benchmark phases follow.
 
 ## Design principle
 
@@ -42,13 +43,25 @@ cargo run --release -p snapforge-cli -- workload --kind cpu-memory \
     --memory-mib 64 --threads 2 --state-file /tmp/sf-state.json
 cargo run --release -p snapforge-cli -- workload --kind cpu-memory \
     --memory-mib 64 --threads 2 --validate --state-file /tmp/sf-state.json
+
+# Report process lifecycle status (no CRIU required).
+cargo run --release -p snapforge-cli -- status --pid $$
+
+# Capture and restore a real checkpoint (requires a CRIU-capable host).
+cargo run --release -p snapforge-cli -- checkpoint --pid <PID> --output /tmp/ckpt
+cargo run --release -p snapforge-cli -- restore --input /tmp/ckpt
 ```
+
+On a host that cannot run CRIU, `checkpoint`/`restore` fail with an explicit
+capability diagnostic and produce no artifacts — SnapForge never fabricates
+checkpoint data.
 
 ## Workspace layout
 
 ```
 crates/
   snapforge-core      errors, config, logging, host probing, workload harness
+  snapforge-engine    CRIU orchestration (checkpoint, restore, status, gating)
   snapforge-cli       the `snapforge` binary
 workloads/
   cpu-memory/         CPU + anonymous-memory workload
@@ -57,8 +70,8 @@ workloads/
 docs/                 architecture and compatibility notes
 ```
 
-Additional crates (`snapforge-format`, `snapforge-engine`,
-`snapforge-storage`) and the `benchmarks/` harness are added in later phases.
+Additional crates (`snapforge-format`, `snapforge-storage`) and the
+`benchmarks/` harness are added in later phases.
 
 ## Workload harness
 

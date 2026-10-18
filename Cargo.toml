@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/snapforge-core",
+    "crates/snapforge-engine",
     "crates/snapforge-cli",
     "workloads/cpu-memory",
     "workloads/file-heavy",
@@ -31,6 +32,7 @@ humantime = "2.2.0"
 
 # Internal crates
 snapforge-core = { path = "crates/snapforge-core" }
+snapforge-engine = { path = "crates/snapforge-engine" }
 
 [profile.release]
 lto = "thin"

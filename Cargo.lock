@@ -418,6 +418,7 @@ dependencies = [
  "clap",
  "serde_json",
  "snapforge-core",
+ "snapforge-engine",
  "tracing",
 ]
 
@@ -434,6 +435,19 @@ dependencies = [
  "thiserror",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "snapforge-engine"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "serde",
+ "serde_json",
+ "snapforge-core",
+ "tempfile",
+ "thiserror",
+ "tracing",
 ]
 
 [[package]]

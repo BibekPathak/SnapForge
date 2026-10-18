@@ -40,7 +40,8 @@ the component that understands those semantics.
 ```
 
 `snapforge-core` has no dependency on the other SnapForge crates, keeping the
-lower layers reusable and independently testable.
+lower layers reusable and independently testable. `snapforge-engine` depends on
+`snapforge-core` for host probing and configuration.
 
 ## Phase 1 components
 
@@ -80,6 +81,50 @@ protocol, and post-restore validation together. The three workload binaries
 Validation compares the *expected* state derived from parameters against the
 state actually observed, catching both tampering/corruption (digest mismatch)
 and wrong-parameter restores.
+
+## Phase 2 components
+
+### `snapforge-engine` (CRIU orchestration)
+
+`snapforge-engine` owns the workflow around CRIU. It is deliberately explicit
+about the responsibility boundary: CRIU captures and restores process state;
+the engine decides *whether*, *with what arguments*, and *how to report*.
+
+Modules:
+
+- `criu` — discovers the `criu` binary (shell-free `PATH` search), parses
+  `criu --version` (`CriuVersion`, minimum 3.15), and invokes CRIU through
+  `Criu::run`. Every invocation uses an explicit argument array (never shell
+  interpolation) and captures stdout, stderr, exit code, duration, and whether
+  a timeout fired.
+- `engine` — `Engine` validates prerequisites, runs `dump`/`restore`, stages
+  artifacts, summarizes them, and cleans up after failure. `status_of(pid)`
+  reads process lifecycle state from `/proc` without needing CRIU.
+- `error` — `EngineError`, including the `is_capability_block()` predicate that
+  distinguishes "this host cannot do it" from "the operation failed".
+
+Key behaviours, all covered by tests:
+
+1. **Capability gate.** `Engine::ensure_capable` consults the Phase 1
+   `HostReport`. If `CriuReadiness != Ready`, the operation fails with
+   `HostNotCapable` *before* invoking CRIU. No fabricated results.
+2. **Never success on failure.** A non-zero CRIU exit becomes
+   `EngineError::CriuFailed` (with captured stderr). Partial output is cleaned.
+3. **Empty checkpoint is failure.** If CRIU reports success but produces zero
+   artifact files, the engine raises `EmptyCheckpoint` and cleans up, so an
+   empty directory is never published as a valid snapshot.
+4. **Bounded timeouts.** The child CRIU process is placed in its own process
+   group (`setpgid`); on timeout the whole group is killed with `killpg`, and
+   stdout/stderr are drained on dedicated threads so an inherited pipe cannot
+   block completion. `Timeout` is returned and output cleaned.
+5. **Explicit arguments.** Flags such as `--shell-job`, `--leave-running`, and
+   `--restore-detached` are built as discrete argv entries.
+6. **Safe cleanup.** On failure, only files under the checkpoint directory are
+   removed; the directory itself is removed only if it becomes empty.
+
+Real capture/restore cannot run on the development host (see
+`docs/compatibility.md`); the engine's control flow is therefore verified with
+controllable fake CRIU binaries plus an explicit runtime capability gate.
 
 ## Later phases (planned)
 
