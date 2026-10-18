@@ -156,10 +156,57 @@ and only then renamed into place; an existing snapshot id is never overwritten.
 See `docs/snapshot-format.md` for the field-by-field schema, the informational
 vs restore-critical distinction, and the full validation rule list.
 
-## Later phases (planned)
+## Phase 4 components
 
-- **Storage**: streaming chunker, BLAKE3 content-addressing, dedup, bounded
-  parallel writes with backpressure and a documented memory budget.
+### `snapforge-storage` (content-addressed storage pipeline)
+
+`snapforge-storage` implements the storage side of the snapshot model. It never
+reads an entire snapshot into RAM and never exposes a partially written chunk as
+valid.
+
+Modules:
+
+- `chunker` — a streaming fixed-size chunker over any `Read`. It holds at most
+  one chunk-sized buffer at a time, so memory is bounded by the configured chunk
+  size regardless of input length. Each chunk's id is the hex BLAKE3 digest of
+  its bytes. Chunk sizes are configurable; 64 KiB, 256 KiB, 1 MiB and 4 MiB are
+  benchmarked. SnapForge does not assume a best size.
+- `cas` — the content-addressed store at `cas/<blake3-hex>`. Writes are atomic
+  (unique temp file + `rename`) and idempotent: storing existing content is a
+  no-op (deduplication). Reads recompute the digest, so corruption is an error,
+  never a silent pass.
+- `pipeline` — ingests a source into the CAS with **bounded concurrency** and
+  backpressure.
+
+### Bounded parallelism and backpressure
+
+The pipeline is bounded at three points, which together cap memory:
+
+1. A bounded `mpsc` channel (capacity = `concurrency`) between the blocking
+   chunker and the storing stage; `blocking_send` applies backpressure to the
+   chunker when the pipeline is saturated.
+2. A `Semaphore(concurrency)` bounds how many chunk-store operations run at
+   once.
+3. Each in-flight unit owns exactly one chunk (`chunk_size` bytes).
+
+Peak memory is therefore bounded by `concurrency * chunk_size` plus a small
+constant. Chunks are stored on `spawn_blocking` threads so the async runtime is
+not stalled. Chunk order is preserved so artifacts reassemble deterministically.
+
+The pipeline records `IngestStats` including `chunks_written`,
+`chunks_deduplicated`, `dedup_saved_bytes`, and `peak_in_flight`, which the
+tests assert never exceeds the configured bound.
+
+### Microbenchmarks
+
+`cargo bench -p snapforge-storage` measures chunking throughput, hashing
+throughput, and end-to-end pipeline ingest throughput across chunk sizes. On the
+development host (Intel Core 5 120U, `powersave` governor, short measurement
+window) representative figures are: chunking ~1.0–1.1 GiB/s, BLAKE3 hashing
+~1.2–2.5 GiB/s, and end-to-end ingest (1 MiB chunks, concurrency 4) ~660 MiB/s.
+These are indicative only; the full, repeated benchmark suite is Phase 7.
+
+## Later phases (planned)
 - **Transfer**: parallel, retrying, cancellable, integrity-verified local copy
   with atomic destination publication.
 - **Incremental**: content-addressed reuse across compatible captures, with

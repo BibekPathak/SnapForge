@@ -4,6 +4,7 @@ members = [
     "crates/snapforge-core",
     "crates/snapforge-engine",
     "crates/snapforge-format",
+    "crates/snapforge-storage",
     "crates/snapforge-cli",
     "workloads/cpu-memory",
     "workloads/file-heavy",
@@ -35,6 +36,7 @@ humantime = "2.2.0"
 snapforge-core = { path = "crates/snapforge-core" }
 snapforge-engine = { path = "crates/snapforge-engine" }
 snapforge-format = { path = "crates/snapforge-format" }
+snapforge-storage = { path = "crates/snapforge-storage" }
 
 [profile.release]
 lto = "thin"

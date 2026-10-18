@@ -19,6 +19,8 @@ tracing.workspace = true
 snapforge-core.workspace = true
 snapforge-engine.workspace = true
 snapforge-format.workspace = true
+snapforge-storage.workspace = true
+tokio.workspace = true
 
 [dev-dependencies]
 blake3.workspace = true

@@ -6,12 +6,12 @@ SnapForge orchestrates **CRIU**-based process checkpoint/restore and adds a
 versioned snapshot format, content-addressed chunk storage, a bounded parallel
 transfer pipeline, and a reproducible benchmark harness.
 
-> **Status: Phase 3 complete.** The workspace, `snapforge doctor`, the
+> **Status: Phase 4 complete.** The workspace, `snapforge doctor`, the
 > deterministic workload harness, the CRIU orchestration engine
-> (`checkpoint`, `restore`, `status`), and the versioned snapshot format with
-> strict validation and atomic publication (`inspect`, `verify`) are
-> implemented and tested. Storage, transfer, incremental, and benchmark phases
-> follow.
+> (`checkpoint`, `restore`, `status`), the versioned snapshot format
+> (`inspect`, `verify`), and the content-addressed storage pipeline
+> (`store`, dedup, bounded concurrency) are implemented and tested. Transfer,
+> incremental, and benchmark phases follow.
 
 ## Design principle
 
@@ -57,6 +57,14 @@ cargo run --release -p snapforge-cli -- restore --input /tmp/ckpt
 cargo run --release -p snapforge-format --example make_fixture -- /tmp/sf-format-store
 cargo run --release -p snapforge-cli -- --store /tmp/sf-format-store inspect fixture-1
 cargo run --release -p snapforge-cli -- --store /tmp/sf-format-store verify fixture-1 --require-chunks
+
+# Storage: ingest a directory of artifacts into content-addressed storage.
+cargo run --release -p snapforge-cli -- --store /tmp/sf-store --chunk-size 262144 \
+    store /path/to/artifacts --id ckpt-1 --workload cpu-memory
+cargo run --release -p snapforge-cli -- --store /tmp/sf-store verify ckpt-1 --require-chunks
+
+# Storage-layer microbenchmarks.
+cargo bench -p snapforge-storage
 ```
 
 On a host that cannot run CRIU, `checkpoint`/`restore` fail with an explicit
@@ -70,6 +78,7 @@ crates/
   snapforge-core      errors, config, logging, host probing, workload harness
   snapforge-engine    CRIU orchestration (checkpoint, restore, status, gating)
   snapforge-format    versioned manifest, validation, atomic publication
+  snapforge-storage   streaming chunker, content-addressed store, pipeline
   snapforge-cli       the `snapforge` binary
 workloads/
   cpu-memory/         CPU + anonymous-memory workload
@@ -78,8 +87,7 @@ workloads/
 docs/                 architecture, compatibility, snapshot format, verification
 ```
 
-Additional crates (`snapforge-storage`) and the `benchmarks/` harness are added
-in later phases.
+The `benchmarks/` harness is added in a later phase.
 
 ## Workload harness
 

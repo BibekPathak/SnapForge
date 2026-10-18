@@ -116,8 +116,24 @@ enum Command {
         require_chunks: bool,
     },
 
-    /// Store checkpoint artifacts into content-addressed storage.
-    Store { source: PathBuf },
+    /// Store a directory of artifacts into content-addressed storage as a
+    /// published snapshot.
+    Store {
+        /// Directory containing the artifacts to ingest.
+        source: PathBuf,
+
+        /// Snapshot id to publish (defaults to the source directory name).
+        #[arg(long)]
+        id: Option<String>,
+
+        /// Workload identifier to record in the manifest.
+        #[arg(long, default_value = "unknown")]
+        workload: String,
+
+        /// Optional parent snapshot id (records an incremental relationship).
+        #[arg(long)]
+        parent: Option<String>,
+    },
 
     /// Transfer a snapshot to another store.
     Transfer { snapshot: String, dest: PathBuf },
@@ -206,7 +222,12 @@ fn main() -> anyhow::Result<()> {
             snapshot,
             require_chunks,
         } => run_verify(&cfg, &snapshot, require_chunks),
-        Command::Store { .. } => not_implemented("store", 4),
+        Command::Store {
+            source,
+            id,
+            workload,
+            parent,
+        } => run_store(&cfg, &source, id, workload, parent),
         Command::Transfer { .. } => not_implemented("transfer", 5),
         Command::Restore {
             input,
@@ -463,6 +484,170 @@ fn collect_cas_chunks(cfg: &Config) -> std::collections::BTreeSet<String> {
         }
     }
     set
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_store(
+    cfg: &Config,
+    source: &std::path::Path,
+    id: Option<String>,
+    workload: String,
+    parent: Option<String>,
+) -> anyhow::Result<()> {
+    if !source.is_dir() {
+        anyhow::bail!("source {} is not a directory", source.display());
+    }
+
+    let snapshot_id = id.unwrap_or_else(|| {
+        source
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("snapshot")
+            .to_string()
+    });
+    snapforge_format::validate_snapshot_id(&snapshot_id)
+        .map_err(|e| anyhow::anyhow!("invalid snapshot id: {e}"))?;
+
+    // Collect artifact files (top-level, non-recursive, deterministic order).
+    let mut files: Vec<PathBuf> = std::fs::read_dir(source)
+        .map_err(|e| anyhow::anyhow!("reading {}: {e}", source.display()))?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_file())
+        .collect();
+    files.sort();
+    if files.is_empty() {
+        anyhow::bail!("source {} contains no files to store", source.display());
+    }
+
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(async {
+        cfg.ensure_dirs()
+            .await
+            .map_err(|e| anyhow::anyhow!("creating store dirs: {e}"))?;
+
+        let cas = std::sync::Arc::new(
+            snapforge_storage::Cas::open(cfg.cas_dir())
+                .map_err(|e| anyhow::anyhow!("opening CAS: {e}"))?,
+        );
+
+        let opts = snapforge_storage::PipelineOptions {
+            chunk_size: cfg.chunk_size,
+            concurrency: cfg.concurrency,
+            verify_on_write: false,
+        };
+
+        let mut artifacts = Vec::new();
+        let mut stats = snapforge_format::SnapshotStats::default();
+        let mut distinct: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+
+        for file in &files {
+            let name = file
+                .file_name()
+                .and_then(|n| n.to_str())
+                .ok_or_else(|| anyhow::anyhow!("non-UTF8 file name: {}", file.display()))?
+                .to_string();
+            let f = std::fs::File::open(file)
+                .map_err(|e| anyhow::anyhow!("opening {}: {e}", file.display()))?;
+            let ingested = snapforge_storage::store_reader(cas.clone(), f, opts.clone())
+                .await
+                .map_err(|e| anyhow::anyhow!("ingesting {}: {e}", file.display()))?;
+
+            stats.total_bytes += ingested.size;
+            stats.total_chunk_refs += ingested.chunks.len() as u64;
+            stats.dedup_saved_bytes += ingested.stats.dedup_saved_bytes;
+            for c in &ingested.chunks {
+                distinct.insert(c.id.clone());
+            }
+            artifacts.push(ingested.into_artifact(name));
+        }
+        stats.distinct_chunks = distinct.len() as u64;
+
+        let manifest = snapforge_format::Manifest {
+            format_version: snapforge_format::FORMAT_VERSION,
+            snapshot_id: snapshot_id.clone(),
+            parent,
+            workload: snapforge_format::WorkloadInfo {
+                id: workload,
+                description: None,
+            },
+            captured_at: now_rfc3339(),
+            compatibility: snapforge_format::Compatibility {
+                arch: std::env::consts::ARCH.into(),
+                kernel_release: host::probe().kernel_release,
+                criu_version: None,
+                criu_image_version: None,
+            },
+            artifacts,
+            stats: stats.clone(),
+            integrity: None,
+        }
+        .sealed()
+        .map_err(|e| anyhow::anyhow!("sealing manifest: {e}"))?;
+
+        // Stage then publish atomically.
+        let staging = cfg.staging_dir().join(&snapshot_id);
+        if staging.exists() {
+            std::fs::remove_dir_all(&staging).ok();
+        }
+        snapforge_format::write_to_dir(&staging, &manifest)
+            .map_err(|e| anyhow::anyhow!("staging manifest: {e}"))?;
+
+        let published = match snapforge_format::publish(
+            &staging,
+            &cfg.snapshots_dir(),
+            &snapforge_format::ValidateOptions::default(),
+        ) {
+            Ok(p) => p,
+            Err(e) => {
+                snapforge_format::cleanup_staging(&staging);
+                return Err(anyhow::anyhow!("publishing snapshot: {e}"));
+            }
+        };
+
+        if cfg.json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "snapshot": snapshot_id,
+                    "path": published.display().to_string(),
+                    "stats": stats,
+                }))?
+            );
+        } else {
+            println!("stored snapshot: {snapshot_id}");
+            println!("  path:          {}", published.display());
+            println!("  artifacts:     {}", manifest.artifacts.len());
+            println!("  total bytes:   {}", stats.total_bytes);
+            println!("  chunk refs:    {}", stats.total_chunk_refs);
+            println!("  distinct:      {}", stats.distinct_chunks);
+            println!("  dedup saved:   {}", stats.dedup_saved_bytes);
+        }
+        Ok::<(), anyhow::Error>(())
+    })
+}
+
+/// RFC 3339 timestamp without pulling in a time crate.
+fn now_rfc3339() -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let secs = now.as_secs();
+    // Civil-from-days conversion (Howard Hinnant's algorithm).
+    let days = (secs / 86_400) as i64;
+    let rem = secs % 86_400;
+    let (h, m, s) = (rem / 3600, (rem % 3600) / 60, rem % 60);
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let mth = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if mth <= 2 { y + 1 } else { y };
+    format!("{year:04}-{mth:02}-{d:02}T{h:02}:{m:02}:{s:02}Z")
 }
 
 fn capability_hint(e: snapforge_engine::EngineError) -> anyhow::Error {
