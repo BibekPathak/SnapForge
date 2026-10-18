@@ -1,0 +1,40 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/snapforge-core",
+    "crates/snapforge-cli",
+    "workloads/cpu-memory",
+    "workloads/file-heavy",
+    "workloads/multithreaded",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+license = "Apache-2.0"
+repository = "https://example.invalid/snapforge"
+authors = ["SnapForge Contributors"]
+
+[workspace.dependencies]
+anyhow = "1.0.98"
+thiserror = "2.0.12"
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1.0.140"
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.19", features = ["env-filter", "json"] }
+clap = { version = "4.5.40", features = ["derive"] }
+blake3 = "1.8.2"
+tokio = { version = "1.45.1", features = ["rt-multi-thread", "fs", "io-util", "sync", "macros", "time", "process", "signal"] }
+libc = "0.2.172"
+humantime = "2.2.0"
+
+# Internal crates
+snapforge-core = { path = "crates/snapforge-core" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
+[profile.bench]
+lto = "thin"

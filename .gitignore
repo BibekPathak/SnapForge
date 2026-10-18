@@ -1,0 +1,27 @@
+# Rust
+/target/
+**/*.rs.bk
+Cargo.lock.orig
+
+# SnapForge runtime data (never commit snapshots or checkpoints)
+/snapforge-data/
+/snapshots/
+/cas/
+/staging/
+*.snapshot
+*.ckpt
+
+# Benchmark outputs and raw results
+/benchmarks/results/
+/benchmarks/**/*.json
+/benchmarks/**/*.csv
+!/benchmarks/schemas/*.json
+
+# Workload scratch files
+/workloads/**/scratch/
+
+# Editor / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
