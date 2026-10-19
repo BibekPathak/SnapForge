@@ -77,6 +77,15 @@ Legend: **ran** = executed here and passed; **skipped** = cannot run here;
 | transfer | refuses conflicting destination | 5 | ran |
 | transfer | rejects zero concurrency | 5 | ran |
 | transfer | CLI transfer + rerun + missing source | 5 | ran |
+| incremental | reuse report counts chunks/bytes correctly | 6 | ran |
+| incremental | chain resolves root-first | 6 | ran |
+| incremental | chain detects cycle | 6 | ran |
+| incremental | chain detects missing parent | 6 | ran |
+| incremental | compaction analysis reports droppable | 6 | ran |
+| incremental | child stores only new chunks (≤1 blob) | 6 | ran |
+| incremental | identical snapshot reuses every chunk | 6 | ran |
+| incremental | chain verifies all chunks in CAS | 6 | ran |
+| incremental | CLI store --parent reuse + inspect/verify --chain | 6 | ran |
 | storage | chunk boundaries, hashing, dedup | 4 | ran |
 | storage | concurrent writes, resource limits | 4 | ran |
 | transfer | retries, cancellation, atomic publish | 5 | pending |
@@ -110,10 +119,18 @@ cargo bench -p snapforge-storage
 cargo run -p snapforge-cli -- --store /tmp/sf-store4 transfer ckpt-1 /tmp/sf-store4b
 cargo run -p snapforge-cli -- --store /tmp/sf-store4b verify ckpt-1 --require-chunks
 
+# Incremental: capture a child linked to a parent, then inspect/verify the chain.
+cargo run -p snapforge-cli -- --store /tmp/sf-store6 --chunk-size 65536 \
+    store /path/to/baseline --id base
+cargo run -p snapforge-cli -- --store /tmp/sf-store6 --chunk-size 65536 \
+    store /path/to/changed --id child --parent base
+cargo run -p snapforge-cli -- --store /tmp/sf-store6 inspect child --chain
+cargo run -p snapforge-cli -- --store /tmp/sf-store6 verify child --chain --require-chunks
+
 # On a host WITHOUT CONFIG_CHECKPOINT_RESTORE these must fail with an explicit
 # capability message (exit 1) and produce no artifacts:
 cargo run -p snapforge-cli -- checkpoint --pid $$ --output /tmp/sf-ckpt
 cargo run -p snapforge-cli -- restore --input /tmp/sf-ckpt
 ```
 
-Total automated tests: **104** (13 core, 18 engine, 24 format, 35 storage, 14 CLI integration).
+Total automated tests: **126** (13 core, 18 engine, 24 format, 40 storage, 17 CLI integration, plus examples/property tests).

@@ -6,12 +6,13 @@ SnapForge orchestrates **CRIU**-based process checkpoint/restore and adds a
 versioned snapshot format, content-addressed chunk storage, a bounded parallel
 transfer pipeline, and a reproducible benchmark harness.
 
-> **Status: Phase 5 complete.** The workspace, `snapforge doctor`, the
+> **Status: Phase 6 complete.** The workspace, `snapforge doctor`, the
 > deterministic workload harness, the CRIU orchestration engine
 > (`checkpoint`, `restore`, `status`), the versioned snapshot format
-> (`inspect`, `verify`), the content-addressed storage pipeline (`store`), and
-> reliable local snapshot transfer (`transfer`) are implemented and tested.
-> Incremental and benchmark phases follow.
+> (`inspect`, `verify`), the content-addressed storage pipeline (`store`),
+> reliable local snapshot transfer (`transfer`), and content-addressed
+> incremental snapshots with lineage (`store --parent`, `inspect --chain`,
+> `verify --chain`) are implemented and tested. The benchmark phase follows.
 
 ## Design principle
 
@@ -69,7 +70,20 @@ cargo bench -p snapforge-storage
 # Transfer a snapshot between local stores (re-running is an idempotent no-op).
 cargo run --release -p snapforge-cli -- --store /tmp/sf-store transfer ckpt-1 /tmp/sf-store-b
 cargo run --release -p snapforge-cli -- --store /tmp/sf-store-b verify ckpt-1 --require-chunks
+
+# Incremental: capture a child linked to a parent, then inspect/verify the chain.
+cargo run --release -p snapforge-cli -- --store /tmp/sf-store --chunk-size 65536 \
+    store /path/to/baseline --id base
+cargo run --release -p snapforge-cli -- --store /tmp/sf-store --chunk-size 65536 \
+    store /path/to/changed --id child --parent base
+cargo run --release -p snapforge-cli -- --store /tmp/sf-store inspect child --chain
+cargo run --release -p snapforge-cli -- --store /tmp/sf-store verify child --chain --require-chunks
 ```
+
+Incremental snapshots are a **storage-layer** feature (content-addressed reuse
+plus lineage), not a CRIU incremental-checkpoint format. See
+[`docs/incremental.md`](docs/incremental.md) for the rationale and measured
+results.
 
 On a host that cannot run CRIU, `checkpoint`/`restore` fail with an explicit
 capability diagnostic and produce no artifacts — SnapForge never fabricates
@@ -88,7 +102,7 @@ workloads/
   cpu-memory/         CPU + anonymous-memory workload
   file-heavy/         file-backed mapping / descriptor workload
   multithreaded/      multithreaded workload
-docs/                 architecture, compatibility, snapshot format, verification
+docs/                 architecture, compatibility, snapshot format, incremental, verification
 ```
 
 The `benchmarks/` harness is added in a later phase.

@@ -104,6 +104,10 @@ enum Command {
     Inspect {
         /// Snapshot id, or a path to a snapshot directory.
         snapshot: String,
+
+        /// Resolve and report the full parent chain, with reuse statistics.
+        #[arg(long, default_value_t = false)]
+        chain: bool,
     },
 
     /// Verify snapshot artifacts and integrity.
@@ -114,6 +118,10 @@ enum Command {
         /// Also require all referenced chunks to be present in the CAS store.
         #[arg(long, default_value_t = false)]
         require_chunks: bool,
+
+        /// Verify every snapshot in the parent chain, not just this one.
+        #[arg(long, default_value_t = false)]
+        chain: bool,
     },
 
     /// Store a directory of artifacts into content-addressed storage as a
@@ -231,11 +239,12 @@ fn main() -> anyhow::Result<()> {
             leave_running,
             timeout_secs,
         } => run_checkpoint(&cfg, pid, output, leave_running, timeout_secs),
-        Command::Inspect { snapshot } => run_inspect(&cfg, &snapshot),
+        Command::Inspect { snapshot, chain } => run_inspect(&cfg, &snapshot, chain),
         Command::Verify {
             snapshot,
             require_chunks,
-        } => run_verify(&cfg, &snapshot, require_chunks),
+            chain,
+        } => run_verify(&cfg, &snapshot, require_chunks, chain),
         Command::Store {
             source,
             id,
@@ -373,7 +382,7 @@ fn resolve_snapshot(cfg: &Config, arg: &str) -> PathBuf {
     cfg.snapshots_dir().join(arg)
 }
 
-fn run_inspect(cfg: &Config, snapshot: &str) -> anyhow::Result<()> {
+fn run_inspect(cfg: &Config, snapshot: &str, chain: bool) -> anyhow::Result<()> {
     let dir = resolve_snapshot(cfg, snapshot);
     let manifest = snapforge_format::load(&dir)
         .map_err(|e| anyhow::anyhow!("failed to load snapshot at {}: {e}", dir.display()))?;
@@ -391,12 +400,15 @@ fn run_inspect(cfg: &Config, snapshot: &str) -> anyhow::Result<()> {
             Ok(_) => (true, None),
             Err(e) => (false, Some(e.to_string())),
         };
-        let out = serde_json::json!({
+        let mut out = serde_json::json!({
             "path": dir.display().to_string(),
             "manifest": manifest,
             "valid": valid,
             "error": err,
         });
+        if chain {
+            out["chain"] = chain_report(cfg, &manifest.snapshot_id)?;
+        }
         println!("{}", serde_json::to_string_pretty(&out)?);
     } else {
         println!("snapshot:   {}", manifest.snapshot_id);
@@ -424,6 +436,13 @@ fn run_inspect(cfg: &Config, snapshot: &str) -> anyhow::Result<()> {
             "chunks:     distinct={} refs={} dedup_saved={}",
             s.distinct_chunks, s.total_chunk_refs, s.dedup_saved_bytes
         );
+        if let (Some(reused), Some(new), Some(reused_bytes)) =
+            (s.reused_chunks, s.new_chunks, s.reused_bytes)
+        {
+            println!(
+                "incremental:reused_chunks={reused} new_chunks={new} reused_bytes={reused_bytes}"
+            );
+        }
         println!(
             "integrity:  {}",
             manifest.integrity.as_deref().unwrap_or("<missing>")
@@ -431,6 +450,9 @@ fn run_inspect(cfg: &Config, snapshot: &str) -> anyhow::Result<()> {
         match &validation {
             Ok(_) => println!("validation: OK"),
             Err(e) => println!("validation: FAILED ({e})"),
+        }
+        if chain {
+            print_chain(cfg, &manifest.snapshot_id)?;
         }
     }
 
@@ -440,56 +462,157 @@ fn run_inspect(cfg: &Config, snapshot: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn run_verify(cfg: &Config, snapshot: &str, require_chunks: bool) -> anyhow::Result<()> {
+/// Resolve the parent chain of `tip` and build a JSON report with per-link
+/// reuse relative to the immediate parent.
+fn chain_report(cfg: &Config, tip: &str) -> anyhow::Result<serde_json::Value> {
+    let snapshots_dir = cfg.snapshots_dir();
+    let chain = snapforge_storage::resolve_chain(tip, |id| {
+        snapforge_format::load(&snapshots_dir.join(id)).ok()
+    })
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    let manifests: Vec<snapforge_format::Manifest> = chain
+        .ids
+        .iter()
+        .map(|id| {
+            snapforge_format::load(&snapshots_dir.join(id))
+                .map_err(|e| anyhow::anyhow!("loading {id}: {e}"))
+        })
+        .collect::<anyhow::Result<_>>()?;
+
+    let mut links = Vec::new();
+    for i in 1..manifests.len() {
+        let report = snapforge_storage::ReuseReport::compute(&manifests[i], &manifests[i - 1]);
+        links.push(serde_json::to_value(&report)?);
+    }
+
+    let analysis = snapforge_storage::analyze_compaction(&manifests);
+
+    Ok(serde_json::json!({
+        "chain": chain.ids,
+        "depth": chain.depth(),
+        "links": links,
+        "compaction": analysis,
+    }))
+}
+
+/// Human-readable chain printing for `inspect --chain`.
+fn print_chain(cfg: &Config, tip: &str) -> anyhow::Result<()> {
+    let report = chain_report(cfg, tip)?;
+    let ids = report["chain"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>())
+        .unwrap_or_default();
+    println!("chain:      {}", ids.join(" -> "));
+    if let Some(links) = report["links"].as_array() {
+        for link in links {
+            println!(
+                "  {} <- {} : reused {}/{} chunks ({:.1}% bytes)",
+                link["child"].as_str().unwrap_or("?"),
+                link["parent"].as_str().unwrap_or("?"),
+                link["reused_chunks"].as_u64().unwrap_or(0),
+                link["child_chunks"].as_u64().unwrap_or(0),
+                link["reuse_ratio"].as_f64().unwrap_or(0.0) * 100.0
+            );
+        }
+    }
+    let c = &report["compaction"];
+    println!(
+        "  compaction: {} snapshots, {} chain chunks, {} droppable ({} bytes)",
+        c["snapshots"].as_u64().unwrap_or(0),
+        c["chain_chunks"].as_u64().unwrap_or(0),
+        c["chunks_droppable"].as_u64().unwrap_or(0),
+        c["bytes_droppable"].as_u64().unwrap_or(0)
+    );
+    Ok(())
+}
+
+fn run_verify(
+    cfg: &Config,
+    snapshot: &str,
+    require_chunks: bool,
+    chain: bool,
+) -> anyhow::Result<()> {
     let dir = resolve_snapshot(cfg, snapshot);
     let manifest = snapforge_format::load(&dir)
         .map_err(|e| anyhow::anyhow!("failed to load snapshot at {}: {e}", dir.display()))?;
 
-    let available = if require_chunks {
-        Some(collect_cas_chunks(cfg))
+    // Assemble the set of manifests to verify: just the tip, or the whole chain.
+    let manifests: Vec<snapforge_format::Manifest> = if chain {
+        let snapshots_dir = cfg.snapshots_dir();
+        let c = snapforge_storage::resolve_chain(&manifest.snapshot_id, |id| {
+            snapforge_format::load(&snapshots_dir.join(id)).ok()
+        })
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+        c.ids
+            .iter()
+            .map(|id| {
+                snapforge_format::load(&snapshots_dir.join(id))
+                    .map_err(|e| anyhow::anyhow!("loading {id}: {e}"))
+            })
+            .collect::<anyhow::Result<_>>()?
     } else {
-        None
+        vec![manifest.clone()]
     };
 
-    let opts = ValidateOptions {
-        check_integrity: true,
-        available_chunks: available,
-    };
-
-    match snapforge_format::validate(&manifest, &opts) {
-        Ok(_) => {
+    // Structural + integrity validation for every manifest in scope.
+    for m in &manifests {
+        let available = if require_chunks {
+            Some(collect_cas_chunks(cfg))
+        } else {
+            None
+        };
+        if let Err(e) = snapforge_format::validate(
+            m,
+            &ValidateOptions {
+                check_integrity: true,
+                available_chunks: available,
+            },
+        ) {
             if cfg.json {
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&serde_json::json!({
-                        "snapshot": manifest.snapshot_id,
-                        "valid": true,
-                    }))?
-                );
-            } else {
-                println!("{}: OK", manifest.snapshot_id);
-            }
-            Ok(())
-        }
-        Err(e) => {
-            if cfg.json {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&serde_json::json!({
-                        "snapshot": manifest.snapshot_id,
+                        "snapshot": m.snapshot_id,
                         "valid": false,
                         "error": e.to_string(),
                     }))?
                 );
             }
-            Err(match e {
+            return Err(match e {
                 FormatError::IntegrityMismatch { .. } => {
-                    anyhow::anyhow!("integrity check failed for {}", manifest.snapshot_id)
+                    anyhow::anyhow!("integrity check failed for {}", m.snapshot_id)
                 }
                 other => anyhow::anyhow!("verification failed: {other}"),
-            })
+            });
         }
     }
+
+    // When verifying a chain with chunk checks, verify each distinct chunk's
+    // content once via the CAS (stronger than presence-only checks).
+    if chain && require_chunks {
+        let cas = snapforge_storage::Cas::open(cfg.cas_dir())
+            .map_err(|e| anyhow::anyhow!("opening CAS: {e}"))?;
+        snapforge_storage::verify_chain(&cas, &manifests)
+            .map_err(|e| anyhow::anyhow!("chain chunk verification failed: {e}"))?;
+    }
+
+    if cfg.json {
+        let ids: Vec<&str> = manifests.iter().map(|m| m.snapshot_id.as_str()).collect();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "snapshots": ids,
+                "valid": true,
+            }))?
+        );
+    } else if chain {
+        let ids: Vec<&str> = manifests.iter().map(|m| m.snapshot_id.as_str()).collect();
+        println!("chain OK: {}", ids.join(" -> "));
+    } else {
+        println!("{}: OK", manifest.snapshot_id);
+    }
+    Ok(())
 }
 
 /// List chunk ids present in the content-addressed store (by file name).
@@ -560,6 +683,42 @@ fn run_store(
         let mut stats = snapforge_format::SnapshotStats::default();
         let mut distinct: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
 
+        // If this is an incremental snapshot, resolve and validate the parent
+        // chain up front so a broken lineage fails before any work.
+        let parent_manifest = if let Some(ref parent_id) = parent {
+            let parent_dir = cfg.snapshots_dir().join(parent_id);
+            if !parent_dir.is_dir() {
+                return Err(anyhow::anyhow!(
+                    "parent snapshot `{parent_id}` not found under {}",
+                    cfg.snapshots_dir().display()
+                ));
+            }
+            let pm = snapforge_format::load_validated(
+                &parent_dir,
+                &snapforge_format::ValidateOptions::default(),
+            )
+            .map_err(|e| anyhow::anyhow!("parent snapshot `{parent_id}` is invalid: {e}"))?
+            .into_inner();
+            // Reject cycles: the new child must not appear in the parent chain.
+            let snapshots_dir = cfg.snapshots_dir();
+            let chain = snapforge_storage::resolve_chain(&pm.snapshot_id, |pid| {
+                snapforge_format::load(&snapshots_dir.join(pid)).ok()
+            });
+            match chain {
+                Ok(c) => {
+                    if c.ids.iter().any(|id| id == &snapshot_id) {
+                        return Err(anyhow::anyhow!(
+                            "incremental parent would create a cycle through `{snapshot_id}`"
+                        ));
+                    }
+                }
+                Err(e) => return Err(anyhow::anyhow!("invalid parent chain: {e}")),
+            }
+            Some(pm)
+        } else {
+            None
+        };
+
         for file in &files {
             let name = file
                 .file_name()
@@ -582,10 +741,10 @@ fn run_store(
         }
         stats.distinct_chunks = distinct.len() as u64;
 
-        let manifest = snapforge_format::Manifest {
+        let mut manifest = snapforge_format::Manifest {
             format_version: snapforge_format::FORMAT_VERSION,
             snapshot_id: snapshot_id.clone(),
-            parent,
+            parent: parent.clone(),
             workload: snapforge_format::WorkloadInfo {
                 id: workload,
                 description: None,
@@ -600,9 +759,22 @@ fn run_store(
             artifacts,
             stats: stats.clone(),
             integrity: None,
+        };
+
+        // Compute incremental reuse against the parent, if any, and record it.
+        let reuse = parent_manifest
+            .as_ref()
+            .map(|pm| snapforge_storage::ReuseReport::compute(&manifest, pm));
+        if let Some(r) = &reuse {
+            manifest.stats.reused_chunks = Some(r.reused_chunks);
+            manifest.stats.new_chunks = Some(r.new_chunks);
+            manifest.stats.reused_bytes = Some(r.reused_bytes);
+            stats = manifest.stats.clone();
         }
-        .sealed()
-        .map_err(|e| anyhow::anyhow!("sealing manifest: {e}"))?;
+
+        let manifest = manifest
+            .sealed()
+            .map_err(|e| anyhow::anyhow!("sealing manifest: {e}"))?;
 
         // Stage then publish atomically.
         let staging = cfg.staging_dir().join(&snapshot_id);
@@ -625,14 +797,15 @@ fn run_store(
         };
 
         if cfg.json {
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&serde_json::json!({
-                    "snapshot": snapshot_id,
-                    "path": published.display().to_string(),
-                    "stats": stats,
-                }))?
-            );
+            let mut value = serde_json::json!({
+                "snapshot": snapshot_id,
+                "path": published.display().to_string(),
+                "stats": stats,
+            });
+            if let Some(r) = &reuse {
+                value["reuse"] = serde_json::to_value(r)?;
+            }
+            println!("{}", serde_json::to_string_pretty(&value)?);
         } else {
             println!("stored snapshot: {snapshot_id}");
             println!("  path:          {}", published.display());
@@ -641,6 +814,16 @@ fn run_store(
             println!("  chunk refs:    {}", stats.total_chunk_refs);
             println!("  distinct:      {}", stats.distinct_chunks);
             println!("  dedup saved:   {}", stats.dedup_saved_bytes);
+            if let Some(r) = &reuse {
+                println!("  incremental:   parent={}", r.parent);
+                println!(
+                    "  reuse:         {}/{} chunks, {} bytes reused, {:.1}% by bytes",
+                    r.reused_chunks,
+                    r.child_chunks,
+                    r.reused_bytes,
+                    r.reuse_ratio * 100.0
+                );
+            }
         }
         Ok::<(), anyhow::Error>(())
     })

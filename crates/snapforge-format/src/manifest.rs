@@ -89,6 +89,16 @@ pub struct SnapshotStats {
     /// Wall-clock packaging duration, if measured.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub packaging_duration_ms: Option<u64>,
+    /// For incremental snapshots: distinct child chunks also present in the
+    /// parent. Informational; computed at packaging time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reused_chunks: Option<u64>,
+    /// For incremental snapshots: child chunks not present in the parent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub new_chunks: Option<u64>,
+    /// For incremental snapshots: bytes covered by reused chunks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reused_bytes: Option<u64>,
 }
 
 /// The complete, immutable snapshot manifest.

@@ -65,6 +65,9 @@ fn build_source(store: &Path, id: &str, num_chunks: usize, chunk_len: usize) -> 
             dedup_saved_bytes: 0,
             capture_duration_ms: None,
             packaging_duration_ms: None,
+            reused_chunks: None,
+            new_chunks: None,
+            reused_bytes: None,
         },
         integrity: None,
     }

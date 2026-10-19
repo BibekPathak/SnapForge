@@ -112,6 +112,9 @@ fn main() -> anyhow::Result<()> {
             dedup_saved_bytes: 256 * 1024,
             capture_duration_ms: None,
             packaging_duration_ms: None,
+            reused_chunks: None,
+            new_chunks: None,
+            reused_bytes: None,
         },
         integrity: None,
     }

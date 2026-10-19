@@ -62,6 +62,9 @@ fn sample_manifest(id: &str) -> Manifest {
             dedup_saved_bytes: 1024,
             capture_duration_ms: Some(42),
             packaging_duration_ms: Some(7),
+            reused_chunks: None,
+            new_chunks: None,
+            reused_bytes: None,
         },
         integrity: None,
     };

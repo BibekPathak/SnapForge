@@ -237,10 +237,37 @@ any cloud account. An HTTP-backed adapter can be added later behind the same
 interface. Larger end-to-end transfer benchmarks (cold/warm cache, chunk size,
 concurrency) are Phase 7.
 
+## Phase 6 components
+
+### `snapforge-storage::incremental` (content-addressed reuse + lineage)
+
+Incremental snapshots are a **storage-layer** feature: because chunks are
+content-addressed, repeated bytes between two captures are stored once. A child
+snapshot records its `parent` id for explicit lineage, and reuse is measured.
+
+- `ReuseReport::compute(child, parent)` quantifies reused vs new chunks and
+  bytes, and the reuse ratio by bytes.
+- `resolve_chain(tip, resolve)` walks parent pointers root-first with a bounded
+  cap, rejecting missing links and cycles.
+- `verify_chain(cas, manifests)` verifies every distinct chunk across the chain
+  against the CAS.
+- `analyze_compaction(chain)` reports the chunks/bytes reachable only through
+  non-tip snapshots (analysis only; no automatic compaction).
+
+The `parent` link is lineage, **not** a restore dependency: each snapshot is a
+complete manifest over the shared CAS. SnapForge does not diff memory or
+synthesize CRIU images. The measured benefit is storage/packaging, not restore
+speed. See `docs/incremental.md` for the full rationale, measured figures, and
+the explicit list of non-claims.
+
+The CLI records reuse in `SnapshotStats` (informational fields), reports it on
+`store --parent`, prints per-link reuse on `inspect --chain`, and validates the
+whole chain on `verify --chain --require-chunks`. Capture-time cycle detection
+rejects a child whose id already appears in the parent's chain, and a missing
+parent fails before any work.
+
 ## Later phases (planned)
 
-- **Incremental**: content-addressed reuse across compatible captures, with
-  explicit parent dependencies; documented as a storage-layer experiment.
 - **Benchmarks**: Python harness distinguishing capture, packaging, transfer,
   and restore costs, with raw JSON/CSV and Markdown reports.
 
