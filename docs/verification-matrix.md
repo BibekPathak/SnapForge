@@ -89,6 +89,13 @@ Legend: **ran** = executed here and passed; **skipped** = cannot run here;
 | storage | chunk boundaries, hashing, dedup | 4 | ran |
 | storage | concurrent writes, resource limits | 4 | ran |
 | transfer | retries, cancellation, atomic publish | 5 | pending |
+| benchmark | `bench` is labeled `storage_only`, never a checkpoint | 7 | ran |
+| benchmark | `bench --bench-json` emits labeled JSON; human mode is not JSON | 7 | ran |
+| benchmark | storage sweep completes; timings/RSS recorded | 7 | ran |
+| benchmark | transfer cold + warm (idempotent) measured | 7 | ran |
+| benchmark | incremental reuse measured (0.875 for 1/8 change) | 7 | ran |
+| benchmark | CRIU experiment recorded as skipped with reason | 7 | ran (skipped on this host) |
+| benchmark | all result records validate against schema | 7 | ran (94/94) |
 | engine | **real** CRIU capture/restore | 2 | **skipped: kernel lacks `CONFIG_CHECKPOINT_RESTORE`** |
 
 ## How to reproduce checks
@@ -115,6 +122,16 @@ cargo run -p snapforge-cli -- --store /tmp/sf-store4 verify ckpt-1 --require-chu
 # Microbenchmarks (storage layer).
 cargo bench -p snapforge-storage
 
+# Storage-only end-to-end benchmark (explicitly NOT a process checkpoint).
+snapforge --store /tmp/sf-bench --chunk-size 262144 --concurrency 4 \
+    --json bench --size-mib 256
+
+# Full reproducible benchmark suite + report artifacts.
+CARGO_TARGET_DIR=/tmp/snapforge-target cargo build --release -p snapforge-cli
+python3 benchmarks/run.py --quick --out /tmp/sf-bench-out   # smoke test
+python3 benchmarks/run.py --sizes 64,256 --repetitions 3 \
+    --workdir /var/tmp/snapforge-bench --out benchmarks/results
+
 # Transfer a snapshot between local stores (second run is an idempotent no-op).
 cargo run -p snapforge-cli -- --store /tmp/sf-store4 transfer ckpt-1 /tmp/sf-store4b
 cargo run -p snapforge-cli -- --store /tmp/sf-store4b verify ckpt-1 --require-chunks
@@ -133,4 +150,4 @@ cargo run -p snapforge-cli -- checkpoint --pid $$ --output /tmp/sf-ckpt
 cargo run -p snapforge-cli -- restore --input /tmp/sf-ckpt
 ```
 
-Total automated tests: **126** (13 core, 18 engine, 24 format, 40 storage, 17 CLI integration, plus examples/property tests).
+Total automated tests: **112** (13 core, 18 engine, 24 format, 41 storage, 16 CLI integration; property tests are included in the format and storage totals). Benchmark result records are validated separately against `benchmarks/schemas/result.schema.json`.

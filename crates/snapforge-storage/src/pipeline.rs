@@ -68,6 +68,14 @@ pub struct IngestStats {
     pub dedup_saved_bytes: u64,
     /// Peak number of chunks in flight simultaneously.
     pub peak_in_flight: usize,
+    /// Wall-clock nanoseconds spent in the chunker thread (reading, hashing, and
+    /// any time blocked on the bounded channel due to backpressure).
+    pub chunking_time_ns: u64,
+    /// Wall-clock nanoseconds spent in CAS writes (summed across workers; this
+    /// is aggregate worker time, not wall time).
+    pub storage_time_ns: u64,
+    /// Wall-clock nanoseconds for the whole `store_reader` call.
+    pub total_time_ns: u64,
 }
 
 /// The result of ingesting one source into the CAS.
@@ -103,14 +111,18 @@ pub async fn store_reader<R: Read + Send + 'static>(
     opts.validate()?;
     let chunk_size = opts.chunk_size;
     let semaphore = Arc::new(Semaphore::new(opts.concurrency));
+    let started = std::time::Instant::now();
+    let chunking_ns = Arc::new(std::sync::atomic::AtomicU64::new(0));
 
     // Chunking runs on a blocking thread; it pushes (index, ChunkRef, bytes)
     // into a bounded channel so producers block when the pipeline is saturated.
     let (tx, mut rx) = tokio::sync::mpsc::channel::<(usize, ChunkRef, Vec<u8>)>(opts.concurrency);
 
+    let chunking_ns_writer = chunking_ns.clone();
     let chunker_handle = tokio::task::spawn_blocking(move || {
         let mut chunker = Chunker::new(reader, chunk_size);
         let mut idx = 0usize;
+        let chunk_start = std::time::Instant::now();
         loop {
             match chunker.next_chunk() {
                 Ok(Some(chunk)) => {
@@ -127,6 +139,10 @@ pub async fn store_reader<R: Read + Send + 'static>(
                 Err(e) => return Err(e),
             }
         }
+        chunking_ns_writer.store(
+            chunk_start.elapsed().as_nanos() as u64,
+            std::sync::atomic::Ordering::SeqCst,
+        );
         Ok::<usize, std::io::Error>(idx)
     });
 
@@ -158,6 +174,7 @@ pub async fn store_reader<R: Read + Send + 'static>(
             }
 
             let id = reference.id.clone();
+            let store_start = std::time::Instant::now();
             let store_result = tokio::task::spawn_blocking(move || {
                 let (id, newly_written) = cas.put(&bytes)?;
                 if verify {
@@ -167,6 +184,7 @@ pub async fn store_reader<R: Read + Send + 'static>(
             })
             .await
             .map_err(|e| StorageError::Join(e.to_string()))?;
+            let store_elapsed = store_start.elapsed().as_nanos() as u64;
 
             let (stored_id, newly_written) = store_result?;
             // The recomputed id must match the chunker's id.
@@ -176,6 +194,7 @@ pub async fn store_reader<R: Read + Send + 'static>(
                 let mut s = stats.lock().await;
                 s.bytes_in += reference.length;
                 s.chunk_refs += 1;
+                s.storage_time_ns += store_elapsed;
                 if newly_written {
                     s.chunks_written += 1;
                 } else {
@@ -225,6 +244,10 @@ pub async fn store_reader<R: Read + Send + 'static>(
     let final_stats = Arc::try_unwrap(stats)
         .map_err(|_| StorageError::Other("stats still shared".into()))?
         .into_inner();
+
+    let mut final_stats = final_stats;
+    final_stats.chunking_time_ns = chunking_ns.load(std::sync::atomic::Ordering::SeqCst);
+    final_stats.total_time_ns = started.elapsed().as_nanos() as u64;
 
     Ok(IngestedArtifact {
         chunks,

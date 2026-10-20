@@ -1,11 +1,54 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "SnapForge benchmark result (Phase 7)",
-  "description": "Placeholder schema for raw benchmark records. Populated in Phase 7.",
+  "title": "SnapForge benchmark result record",
+  "description": "One measured record from the SnapForge benchmark harness. Records are stored as newline-delimited JSON (raw.jsonl) and flattened to CSV.",
   "type": "object",
-  "required": ["schema_version"],
+  "required": [
+    "schema_version",
+    "run_id",
+    "timestamp",
+    "experiment",
+    "kind",
+    "parameters",
+    "environment",
+    "metrics",
+    "repetition"
+  ],
   "properties": {
-    "schema_version": { "type": "integer", "const": 1 }
+    "schema_version": { "type": "integer", "const": 1 },
+    "run_id": { "type": "string" },
+    "timestamp": { "type": "string" },
+    "experiment": {
+      "type": "string",
+      "description": "Logical experiment name, e.g. storage_pipeline, transfer, incremental."
+    },
+    "kind": {
+      "type": "string",
+      "description": "csvr | storage_only | transfer | incremental — what was measured."
+    },
+    "label": { "type": "string" },
+    "repetition": { "type": "integer", "minimum": 0 },
+    "parameters": { "type": "object" },
+    "environment": { "type": "object" },
+    "metrics": {
+      "type": "object",
+      "description": "Measured values; all timings in milliseconds unless suffixed otherwise.",
+      "properties": {
+        "duration_ms": { "type": ["number", "null"] },
+        "throughput_mib_s": { "type": ["number", "null"] },
+        "bytes": { "type": ["number", "null"] },
+        "peak_rss_kib": { "type": ["number", "null"] },
+        "dedup_saved_bytes": { "type": ["number", "null"] },
+        "reuse_ratio": { "type": ["number", "null"] }
+      },
+      "additionalProperties": true
+    },
+    "status": {
+      "type": "string",
+      "enum": ["ok", "skipped", "failed"]
+    },
+    "skip_reason": { "type": ["string", "null"] },
+    "error": { "type": ["string", "null"] }
   },
   "additionalProperties": true
 }

@@ -182,10 +182,21 @@ enum Command {
     List,
 
     /// Run storage-only benchmarks (clearly labeled as non-CRIU experiments).
+    ///
+    /// This measures the SnapForge storage pipeline in isolation. It does NOT
+    /// capture a process; output is explicitly labeled `storage_only`.
     Bench {
-        /// Path to benchmark input, if any.
+        /// Data size to ingest, in MiB.
+        #[arg(long, default_value_t = 256)]
+        size_mib: u64,
+
+        /// Path to a source directory to ingest instead of synthetic data.
         #[arg(long)]
         input: Option<PathBuf>,
+
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        bench_json: bool,
     },
 }
 
@@ -263,7 +274,11 @@ fn main() -> anyhow::Result<()> {
         } => run_restore(&cfg, input, timeout_secs),
         Command::Status { pid } => run_status(&cfg, pid),
         Command::List => not_implemented("list", 3),
-        Command::Bench { .. } => not_implemented("bench", 4),
+        Command::Bench {
+            size_mib,
+            input,
+            bench_json,
+        } => run_bench(&cfg, size_mib, input, bench_json),
     }
 }
 
@@ -827,6 +842,112 @@ fn run_store(
         }
         Ok::<(), anyhow::Error>(())
     })
+}
+
+/// Storage-only benchmark. See the `bench` subcommand help.
+fn run_bench(
+    cfg: &Config,
+    size_mib: u64,
+    input: Option<PathBuf>,
+    json: bool,
+) -> anyhow::Result<()> {
+    // Generate deterministic, incompressible-ish synthetic data (or read a dir).
+    let bytes: Vec<u8> = if let Some(dir) = &input {
+        let mut all = Vec::new();
+        let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
+            .map_err(|e| anyhow::anyhow!("reading {}: {e}", dir.display()))?
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.is_file())
+            .collect();
+        files.sort();
+        for f in files {
+            all.extend_from_slice(&std::fs::read(&f).map_err(|e| anyhow::anyhow!("{e}"))?);
+        }
+        all
+    } else {
+        let len = (size_mib as usize) * 1024 * 1024;
+        let mut v = Vec::with_capacity(len);
+        let mut x = 0x243F_6A88_85A3_08D3u64;
+        for _ in 0..len {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            v.push((x >> 24) as u8);
+        }
+        v
+    };
+
+    let total_bytes = bytes.len() as u64;
+
+    let rt = tokio::runtime::Runtime::new()?;
+    let result = rt.block_on(async {
+        cfg.ensure_dirs()
+            .await
+            .map_err(|e| anyhow::anyhow!("creating store dirs: {e}"))?;
+        let cas = std::sync::Arc::new(
+            snapforge_storage::Cas::open(cfg.cas_dir())
+                .map_err(|e| anyhow::anyhow!("opening CAS: {e}"))?,
+        );
+        let opts = snapforge_storage::PipelineOptions {
+            chunk_size: cfg.chunk_size,
+            concurrency: cfg.concurrency,
+            verify_on_write: false,
+        };
+        let ingested = snapforge_storage::store_reader(cas, std::io::Cursor::new(bytes), opts)
+            .await
+            .map_err(|e| anyhow::anyhow!("ingest failed: {e}"))?;
+        Ok::<_, anyhow::Error>(ingested)
+    })?;
+
+    let s = &result.stats;
+    let total_ns = s.total_time_ns.max(1);
+    let throughput_mib_s = (total_bytes as f64 / (1024.0 * 1024.0)) / (total_ns as f64 / 1e9);
+    let peak_rss_kib = read_peak_rss_kib();
+
+    let record = serde_json::json!({
+        // Explicit label: this is NOT a process checkpoint.
+        "kind": "storage_only",
+        "label": "storage-only experiment (not a process checkpoint)",
+        "chunk_size": cfg.chunk_size,
+        "concurrency": cfg.concurrency,
+        "total_bytes": total_bytes,
+        "chunks": s.chunk_refs,
+        "chunks_written": s.chunks_written,
+        "chunks_deduplicated": s.chunks_deduplicated,
+        "dedup_saved_bytes": s.dedup_saved_bytes,
+        "peak_in_flight": s.peak_in_flight,
+        "chunking_time_ns": s.chunking_time_ns,
+        "storage_time_ns": s.storage_time_ns,
+        "total_time_ns": total_ns,
+        "throughput_mib_s": throughput_mib_s,
+        "peak_rss_kib": peak_rss_kib,
+    });
+
+    if json || cfg.json {
+        println!("{}", serde_json::to_string_pretty(&record)?);
+    } else {
+        println!("storage-only experiment (not a process checkpoint)");
+        println!("  chunk size:    {}", cfg.chunk_size);
+        println!("  concurrency:   {}", cfg.concurrency);
+        println!("  bytes:         {total_bytes}");
+        println!("  throughput:    {:.1} MiB/s", throughput_mib_s);
+        println!("  total:         {:.1} ms", total_ns as f64 / 1e6);
+        println!("  dedup saved:   {} bytes", s.dedup_saved_bytes);
+    }
+    Ok(())
+}
+
+/// Read peak resident set size (VmHWM) from `/proc/self/status`, in KiB.
+fn read_peak_rss_kib() -> Option<u64> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    for line in status.lines() {
+        if let Some(rest) = line.strip_prefix("VmHWM:") {
+            let kib = rest.split_whitespace().next()?.parse().ok()?;
+            return Some(kib);
+        }
+    }
+    None
 }
 
 /// RFC 3339 timestamp without pulling in a time crate.

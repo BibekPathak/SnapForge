@@ -25,3 +25,7 @@ Cargo.lock.orig
 .vscode/
 *.swp
 .DS_Store
+
+# Python
+__pycache__/
+*.pyc

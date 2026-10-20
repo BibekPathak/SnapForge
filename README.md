@@ -6,13 +6,15 @@ SnapForge orchestrates **CRIU**-based process checkpoint/restore and adds a
 versioned snapshot format, content-addressed chunk storage, a bounded parallel
 transfer pipeline, and a reproducible benchmark harness.
 
-> **Status: Phase 6 complete.** The workspace, `snapforge doctor`, the
+> **Status: Phase 7 complete.** The workspace, `snapforge doctor`, the
 > deterministic workload harness, the CRIU orchestration engine
 > (`checkpoint`, `restore`, `status`), the versioned snapshot format
 > (`inspect`, `verify`), the content-addressed storage pipeline (`store`),
-> reliable local snapshot transfer (`transfer`), and content-addressed
-> incremental snapshots with lineage (`store --parent`, `inspect --chain`,
-> `verify --chain`) are implemented and tested. The benchmark phase follows.
+> reliable local snapshot transfer (`transfer`), content-addressed incremental
+> snapshots with lineage (`store --parent`, `inspect --chain`, `verify --chain`),
+> and the reproducible benchmark harness (storage, transfer, incremental) are
+> implemented and tested. See [`docs/performance-report.md`](docs/performance-report.md)
+> for measured results on the current host.
 
 ## Design principle
 
@@ -67,6 +69,16 @@ cargo run --release -p snapforge-cli -- --store /tmp/sf-store verify ckpt-1 --re
 # Storage-layer microbenchmarks.
 cargo bench -p snapforge-storage
 
+# Storage-only end-to-end benchmark (explicitly NOT a process checkpoint).
+cargo run --release -p snapforge-cli -- --store /tmp/sf-bench --chunk-size 262144 \
+    --concurrency 4 --json bench --size-mib 256
+
+# Full reproducible benchmark suite (writes JSON/CSV/summary/plots).
+CARGO_TARGET_DIR=/tmp/snapforge-target cargo build --release -p snapforge-cli
+python3 benchmarks/run.py --quick --out /tmp/sf-bench-out   # smoke test
+python3 benchmarks/run.py --sizes 64,256 --repetitions 3 \
+    --workdir /var/tmp/snapforge-bench --out benchmarks/results
+
 # Transfer a snapshot between local stores (re-running is an idempotent no-op).
 cargo run --release -p snapforge-cli -- --store /tmp/sf-store transfer ckpt-1 /tmp/sf-store-b
 cargo run --release -p snapforge-cli -- --store /tmp/sf-store-b verify ckpt-1 --require-chunks
@@ -102,10 +114,14 @@ workloads/
   cpu-memory/         CPU + anonymous-memory workload
   file-heavy/         file-backed mapping / descriptor workload
   multithreaded/      multithreaded workload
-docs/                 architecture, compatibility, snapshot format, incremental, verification
+docs/                 architecture, compatibility, snapshot format, incremental,
+                      verification matrix, benchmark methodology, performance report
 ```
 
-The `benchmarks/` harness is added in a later phase.
+The `benchmarks/` directory contains the reproducible harness
+(`run.py`), the result JSON schema (`schemas/result.schema.json`), and the
+git-ignored `results/` output. See [`docs/benchmark-methodology.md`](docs/benchmark-methodology.md)
+and [`docs/performance-report.md`](docs/performance-report.md).
 
 ## Workload harness
 
@@ -132,6 +148,11 @@ By default SnapForge writes to `/tmp/snapforge` (overridable with `--store`).
 On this development host the home filesystem is nearly full, so `/tmp` is used
 for storage and benchmark data. Operators should point `--store` at a
 sufficiently large, local filesystem for real workloads.
+
+Because `/tmp` is RAM-backed (`tmpfs`) on many systems, the benchmark harness
+defaults to a `/tmp` workdir but accepts `--workdir`; use a disk-backed path such
+as `/var/tmp/snapforge-bench` when measuring storage throughput so results are
+not memory-bandwidth-bound. Always record the medium alongside the numbers.
 
 ## Limitations (current)
 
