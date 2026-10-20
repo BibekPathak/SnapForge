@@ -20,7 +20,8 @@ a restore is attempted. Reuse statistics are measured and recorded.
   and never synthesizes a CRIU image.
 - The `parent` link is **lineage, not a restore dependency**. Restoring a child
   does not "start from the parent"; each snapshot is a complete, self-describing
-  manifest over the shared content-addressed store.
+  manifest over the shared content-addressed store. `snapforge extract` uses only
+  the requested snapshot's manifest and never traverses the parent link.
 - The measured benefit is **storage/packaging** (fewer new bytes for a second
   compatible capture), not a faster CRIU restore.
 
@@ -42,6 +43,10 @@ snapforge --store /tmp/store inspect child --chain
 
 # 4. Verify the whole chain (structure, integrity, and CAS coverage).
 snapforge --store /tmp/store verify child --chain --require-chunks
+
+# 5. Extract the child's files. Only the child manifest is needed; the parent
+#    link is not traversed during extraction.
+snapforge --store /tmp/store extract child --output ./restored
 ```
 
 ## Measured behaviour

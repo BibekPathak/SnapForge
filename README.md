@@ -6,15 +6,16 @@ SnapForge orchestrates **CRIU**-based process checkpoint/restore and adds a
 versioned snapshot format, content-addressed chunk storage, a bounded parallel
 transfer pipeline, and a reproducible benchmark harness.
 
-> **Status: Phase 7 complete.** The workspace, `snapforge doctor`, the
+> **Status: Phase 8 complete.** The workspace, `snapforge doctor`, the
 > deterministic workload harness, the CRIU orchestration engine
 > (`checkpoint`, `restore`, `status`), the versioned snapshot format
 > (`inspect`, `verify`), the content-addressed storage pipeline (`store`),
 > reliable local snapshot transfer (`transfer`), content-addressed incremental
 > snapshots with lineage (`store --parent`, `inspect --chain`, `verify --chain`),
-> and the reproducible benchmark harness (storage, transfer, incremental) are
-> implemented and tested. See [`docs/performance-report.md`](docs/performance-report.md)
-> for measured results on the current host.
+> snapshot extraction (`extract`), and the reproducible benchmark harness
+> (storage, transfer, incremental) are implemented and tested. See
+> [`docs/performance-report.md`](docs/performance-report.md) for measured
+> results on the current host.
 
 ## Design principle
 
@@ -90,6 +91,10 @@ cargo run --release -p snapforge-cli -- --store /tmp/sf-store --chunk-size 65536
     store /path/to/changed --id child --parent base
 cargo run --release -p snapforge-cli -- --store /tmp/sf-store inspect child --chain
 cargo run --release -p snapforge-cli -- --store /tmp/sf-store verify child --chain --require-chunks
+
+# Extract (restore files from) a stored snapshot back to a directory.
+cargo run --release -p snapforge-cli -- --store /tmp/sf-store extract child --output /tmp/sf-restored
+cargo run --release -p snapforge-cli -- --store /tmp/sf-store extract child --output /tmp/sf-restored --json
 ```
 
 Incremental snapshots are a **storage-layer** feature (content-addressed reuse
@@ -108,7 +113,7 @@ crates/
   snapforge-core      errors, config, logging, host probing, workload harness
   snapforge-engine    CRIU orchestration (checkpoint, restore, status, gating)
   snapforge-format    versioned manifest, validation, atomic publication
-  snapforge-storage   streaming chunker, content-addressed store, pipeline, transfer
+  snapforge-storage   streaming chunker, content-addressed store, pipeline, transfer, extract
   snapforge-cli       the `snapforge` binary
 workloads/
   cpu-memory/         CPU + anonymous-memory workload
@@ -158,6 +163,9 @@ not memory-bandwidth-bound. Always record the medium alongside the numbers.
 
 - Real checkpoint/restore is unavailable on the development host because its
   kernel lacks `CONFIG_CHECKPOINT_RESTORE`. See `docs/compatibility.md`.
+- `extract` reassembles stored **files** from content-addressed storage; it does
+  not restore a running process. Process restore (`snapforge restore`) requires
+  CRIU.
 - Storage/transfer/verification features are host-independent and are developed
   and tested regardless of CRIU availability.
 - SnapForge is **not** a sandbox or security boundary. Checkpoints may encode

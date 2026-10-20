@@ -96,6 +96,15 @@ Legend: **ran** = executed here and passed; **skipped** = cannot run here;
 | benchmark | incremental reuse measured (0.875 for 1/8 change) | 7 | ran |
 | benchmark | CRIU experiment recorded as skipped with reason | 7 | ran (skipped on this host) |
 | benchmark | all result records validate against schema | 7 | ran (94/94) |
+| extract | extract round-trips artifacts byte-for-byte | 8 | ran |
+| extract | creates missing and nested destination paths | 8 | ran |
+| extract | reassembles deduplicated/repeated chunks | 8 | ran |
+| extract | refuses non-empty destination without overwrite | 8 | ran |
+| extract | detects missing chunk before writing anything | 8 | ran |
+| extract | detects corrupt chunk (digest mismatch) | 8 | ran |
+| extract | rejects zero concurrency | 8 | ran |
+| extract | CLI extract round-trip + JSON output | 8 | ran |
+| extract | CLI extract refuses non-empty / fails on missing chunk | 8 | ran |
 | engine | **real** CRIU capture/restore | 2 | **skipped: kernel lacks `CONFIG_CHECKPOINT_RESTORE`** |
 
 ## How to reproduce checks
@@ -136,6 +145,12 @@ python3 benchmarks/run.py --sizes 64,256 --repetitions 3 \
 cargo run -p snapforge-cli -- --store /tmp/sf-store4 transfer ckpt-1 /tmp/sf-store4b
 cargo run -p snapforge-cli -- --store /tmp/sf-store4b verify ckpt-1 --require-chunks
 
+# Extract (restore files from) a snapshot into a directory, then compare.
+cargo run -p snapforge-cli -- --store /tmp/sf-store4 extract ckpt-1 --output /tmp/sf-restored
+diff -r /path/to/artifacts /tmp/sf-restored
+# A non-empty destination is refused unless --force is given:
+cargo run -p snapforge-cli -- --store /tmp/sf-store4 extract ckpt-1 --output /tmp/sf-restored --force
+
 # Incremental: capture a child linked to a parent, then inspect/verify the chain.
 cargo run -p snapforge-cli -- --store /tmp/sf-store6 --chunk-size 65536 \
     store /path/to/baseline --id base
@@ -150,4 +165,4 @@ cargo run -p snapforge-cli -- checkpoint --pid $$ --output /tmp/sf-ckpt
 cargo run -p snapforge-cli -- restore --input /tmp/sf-ckpt
 ```
 
-Total automated tests: **112** (13 core, 18 engine, 24 format, 41 storage, 16 CLI integration; property tests are included in the format and storage totals). Benchmark result records are validated separately against `benchmarks/schemas/result.schema.json`.
+Total automated tests: **126** (13 core, 18 engine, 24 format, 52 storage, 19 CLI integration; property tests are included in the format and storage totals). Benchmark result records are validated separately against `benchmarks/schemas/result.schema.json`.

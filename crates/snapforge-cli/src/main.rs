@@ -160,6 +160,24 @@ enum Command {
         max_retries: u32,
     },
 
+    /// Extract a stored snapshot's artifacts back to a directory.
+    ///
+    /// This reassembles the snapshot's files from content-addressed storage,
+    /// verifying every chunk against its content id. It restores *files*, not a
+    /// running process (that is `restore`).
+    Extract {
+        /// Snapshot id, or a path to a snapshot directory.
+        snapshot: String,
+
+        /// Destination directory to write artifacts into.
+        #[arg(long)]
+        output: PathBuf,
+
+        /// Overwrite existing files in a non-empty destination directory.
+        #[arg(long, default_value_t = false)]
+        force: bool,
+    },
+
     /// Restore a process from a checkpoint (requires a CRIU-capable host).
     Restore {
         /// Directory containing the CRIU image files.
@@ -268,6 +286,11 @@ fn main() -> anyhow::Result<()> {
             transfer_concurrency,
             max_retries,
         } => run_transfer(&cfg, &snapshot, &dest, transfer_concurrency, max_retries),
+        Command::Extract {
+            snapshot,
+            output,
+            force,
+        } => run_extract(&cfg, &snapshot, &output, force),
         Command::Restore {
             input,
             timeout_secs,
@@ -1048,6 +1071,63 @@ fn run_transfer(
             println!("  chunks skipped:  {}", outcome.chunks_skipped);
             println!("  bytes copied:    {}", outcome.bytes_transferred);
             println!("  retries:         {}", outcome.retries);
+        }
+        Ok::<(), anyhow::Error>(())
+    })
+}
+
+/// Reconstruct a snapshot's artifacts onto the filesystem.
+fn run_extract(
+    cfg: &Config,
+    snapshot: &str,
+    output: &std::path::Path,
+    force: bool,
+) -> anyhow::Result<()> {
+    let dir = resolve_snapshot(cfg, snapshot);
+    if !dir.is_dir() {
+        anyhow::bail!(
+            "snapshot `{snapshot}` not found under {} (and is not an existing directory)",
+            cfg.snapshots_dir().display()
+        );
+    }
+
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(async {
+        let cas = std::sync::Arc::new(
+            snapforge_storage::Cas::open(cfg.cas_dir())
+                .map_err(|e| anyhow::anyhow!("opening CAS: {e}"))?,
+        );
+        let opts = snapforge_storage::ExtractOptions {
+            concurrency: cfg.concurrency,
+            overwrite: force,
+            ..snapforge_storage::ExtractOptions::default()
+        };
+
+        let outcome = snapforge_storage::extract_snapshot(cas, &dir, output, opts)
+            .await
+            .map_err(|e| anyhow::anyhow!("extract failed: {e}"))?;
+
+        if cfg.json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "snapshot": outcome.snapshot_id,
+                    "destination": outcome.destination.display().to_string(),
+                    "artifacts": outcome.artifacts,
+                    "bytes_written": outcome.bytes_written,
+                    "chunks_read": outcome.chunks_read,
+                    "distinct_chunks": outcome.distinct_chunks,
+                    "duration_ms": outcome.duration_ms,
+                }))?
+            );
+        } else {
+            println!("extracted snapshot: {}", outcome.snapshot_id);
+            println!("  destination:    {}", outcome.destination.display());
+            println!("  artifacts:      {}", outcome.artifacts);
+            println!("  bytes written:  {}", outcome.bytes_written);
+            println!("  chunks read:    {}", outcome.chunks_read);
+            println!("  distinct:       {}", outcome.distinct_chunks);
+            println!("  duration:       {} ms", outcome.duration_ms);
         }
         Ok::<(), anyhow::Error>(())
     })

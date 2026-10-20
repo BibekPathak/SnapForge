@@ -266,10 +266,39 @@ whole chain on `verify --chain --require-chunks`. Capture-time cycle detection
 rejects a child whose id already appears in the parent's chain, and a missing
 parent fails before any work.
 
+## Phase 8 components
+
+### `snapforge-storage::extract` (snapshot extraction / file restore)
+
+Extraction is the inverse of the storage pipeline. Given a published snapshot,
+it reassembles each artifact at its declared relative path under an output
+directory. It restores **files**, not a running process — process restore
+remains CRIU's `restore` path (Phase 2). Guarantees:
+
+1. **Integrity.** Every chunk is read through the CAS, which recomputes its
+   BLAKE3 digest; a mismatch is an error, never a silent pass. Each
+   reconstructed artifact's length is checked against the manifest. Chunk
+   availability is validated before any file is written.
+2. **Bounded concurrency and memory.** At most `concurrency` artifacts are
+   reconstructed at once, and each worker holds at most one chunk buffer.
+3. **Atomic per-file publication.** Each artifact is written to a temporary
+   file in its destination directory and `rename`d into place, so a partially
+   written artifact is never observable at its final path.
+4. **Safe destinations.** Artifact paths are re-validated as relative,
+   normalized paths, so extraction cannot escape the output directory. A
+   pre-existing non-empty destination is refused unless overwrite is enabled.
+5. **Cancellation.** A shared [`CancellationToken`] stops extraction promptly.
+
+The CLI exposes this as `snapforge extract <snapshot> --output <dir> [--force]`,
+printing a summary (or JSON with `--json`). Because it is a storage-layer
+operation it works regardless of CRIU availability.
+
 ## Later phases (planned)
 
-- **Benchmarks**: Python harness distinguishing capture, packaging, transfer,
-  and restore costs, with raw JSON/CSV and Markdown reports.
+- **Remote transfer**: an HTTP-backed adapter behind the existing
+  `transfer_snapshot` interface (local filesystem only today).
+- **Garbage collection / compaction**: `analyze_compaction` reports reclaimable
+  chunks, but there is no destructive `gc` command yet.
 
 ## Concurrency and memory model (design intent)
 

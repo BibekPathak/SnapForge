@@ -33,6 +33,9 @@ pub enum StorageError {
     #[error("storage task failed: {0}")]
     Join(String),
 
+    #[error("extraction failed: {0}")]
+    Extract(String),
+
     #[error("{0}")]
     Other(String),
 }
