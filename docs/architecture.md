@@ -252,7 +252,7 @@ snapshot records its `parent` id for explicit lineage, and reuse is measured.
 - `verify_chain(cas, manifests)` verifies every distinct chunk across the chain
   against the CAS.
 - `analyze_compaction(chain)` reports the chunks/bytes reachable only through
-  non-tip snapshots (analysis only; no automatic compaction).
+  non-tip snapshots. Phase 9 adds an explicit `compact` command that applies it.
 
 The `parent` link is lineage, **not** a restore dependency: each snapshot is a
 complete manifest over the shared CAS. SnapForge does not diff memory or
@@ -293,12 +293,39 @@ The CLI exposes this as `snapforge extract <snapshot> --output <dir> [--force]`,
 printing a summary (or JSON with `--json`). Because it is a storage-layer
 operation it works regardless of CRIU availability.
 
+## Phase 9 components
+
+### `snapforge-storage::gc` (garbage collection + chain compaction)
+
+Nothing removes chunks when a snapshot directory is deleted or a chain is
+flattened, so the CAS accumulates unreferenced data. Phase 9 adds two explicit,
+opt-in maintenance operations. Both are **non-destructive by default** and
+refuse to run if any published manifest cannot be loaded and validated.
+
+1. **`gc(cas, snapshots_dir, opts)`** — mark-and-sweep over the whole store.
+   It loads and validates every published snapshot, unions their referenced
+   chunk ids (the live set), and removes CAS files outside that set. It also
+   removes leftover `.tmp-*` files from interrupted atomic writes. With
+   `dry_run` it reports counts and bytes without deleting. Deletions are
+   bounded by `concurrency`; a manifest load/validation failure aborts before
+   anything is removed.
+2. **`compact_chain(cas, snapshots_dir, tip, opts)`** — flattens a chain to its
+   tip. With `apply` it (a) rewrites the tip's manifest with `parent = None`
+   and a recomputed integrity digest via temp file + `rename`, (b) deletes the
+   ancestor snapshot directories, then (c) runs the sweep. It refuses if any
+   snapshot **outside** the chain still depends on an ancestor being removed,
+   since that would break its lineage. Compacting an already-root snapshot is a
+   no-op. Dry-run reports the ancestors and the chunks/bytes that would be
+   reclaimed without touching the store.
+
+Both operations report `duration_ms` and machine-readable JSON. The CLI exposes
+them as `snapforge gc [--apply]` and `snapforge compact <tip> [--apply]`, so a
+destructive operation requires an explicit flag.
+
 ## Later phases (planned)
 
 - **Remote transfer**: an HTTP-backed adapter behind the existing
   `transfer_snapshot` interface (local filesystem only today).
-- **Garbage collection / compaction**: `analyze_compaction` reports reclaimable
-  chunks, but there is no destructive `gc` command yet.
 
 ## Concurrency and memory model (design intent)
 

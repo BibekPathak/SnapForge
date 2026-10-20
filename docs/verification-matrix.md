@@ -105,6 +105,21 @@ Legend: **ran** = executed here and passed; **skipped** = cannot run here;
 | extract | rejects zero concurrency | 8 | ran |
 | extract | CLI extract round-trip + JSON output | 8 | ran |
 | extract | CLI extract refuses non-empty / fails on missing chunk | 8 | ran |
+| gc | dry run reports orphans without deleting | 9 | ran |
+| gc | apply removes orphans and keeps live chunks | 9 | ran |
+| gc | invalid manifest aborts before deleting anything | 9 | ran |
+| gc | removes leftover temp files from interrupted writes | 9 | ran |
+| gc | shared chunks survive when one referrer is deleted | 9 | ran |
+| gc | rejects zero concurrency (unit) | 9 | ran |
+| gc | live set unions multiple manifests (unit) | 9 | ran |
+| compact | flattens chain and reclaims ancestor-only chunks | 9 | ran |
+| compact | dry run reports but changes nothing | 9 | ran |
+| compact | refuses when an ancestor has another child | 9 | ran |
+| compact | compacting a root is a no-op | 9 | ran |
+| compact | missing snapshot errors cleanly | 9 | ran |
+| compact | CLI compact dry run preserves the chain | 9 | ran |
+| gc | CLI gc dry run then apply | 9 | ran |
+| compact | CLI compact apply keeps the tip restorable | 9 | ran |
 | engine | **real** CRIU capture/restore | 2 | **skipped: kernel lacks `CONFIG_CHECKPOINT_RESTORE`** |
 
 ## How to reproduce checks
@@ -159,10 +174,17 @@ cargo run -p snapforge-cli -- --store /tmp/sf-store6 --chunk-size 65536 \
 cargo run -p snapforge-cli -- --store /tmp/sf-store6 inspect child --chain
 cargo run -p snapforge-cli -- --store /tmp/sf-store6 verify child --chain --require-chunks
 
+# Storage maintenance: both report by default; --apply mutates the store.
+cargo run -p snapforge-cli -- --store /tmp/sf-store6 gc
+cargo run -p snapforge-cli -- --store /tmp/sf-store6 gc --apply
+cargo run -p snapforge-cli -- --store /tmp/sf-store6 compact child
+cargo run -p snapforge-cli -- --store /tmp/sf-store6 compact child --apply
+cargo run -p snapforge-cli -- --store /tmp/sf-store6 verify child --require-chunks
+
 # On a host WITHOUT CONFIG_CHECKPOINT_RESTORE these must fail with an explicit
 # capability message (exit 1) and produce no artifacts:
 cargo run -p snapforge-cli -- checkpoint --pid $$ --output /tmp/sf-ckpt
 cargo run -p snapforge-cli -- restore --input /tmp/sf-ckpt
 ```
 
-Total automated tests: **126** (13 core, 18 engine, 24 format, 52 storage, 19 CLI integration; property tests are included in the format and storage totals). Benchmark result records are validated separately against `benchmarks/schemas/result.schema.json`.
+Total automated tests: **141** (13 core, 18 engine, 24 format, 64 storage, 22 CLI integration; property tests are included in the format and storage totals). Benchmark result records are validated separately against `benchmarks/schemas/result.schema.json`.

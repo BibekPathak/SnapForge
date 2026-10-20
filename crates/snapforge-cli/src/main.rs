@@ -178,6 +178,29 @@ enum Command {
         force: bool,
     },
 
+    /// Garbage-collect chunks that no published snapshot references.
+    ///
+    /// Reports what would be removed by default; pass `--apply` to delete.
+    Gc {
+        /// Actually delete unreferenced chunks (otherwise report only).
+        #[arg(long, default_value_t = false)]
+        apply: bool,
+    },
+
+    /// Flatten a snapshot chain to its tip, then reclaim the freed chunks.
+    ///
+    /// Rewrites the tip as a standalone root, removes its ancestors, and
+    /// sweeps chunks no longer referenced. Reports by default; pass `--apply`
+    /// to modify the store.
+    Compact {
+        /// Tip snapshot id, or a path to a snapshot directory.
+        snapshot: String,
+
+        /// Actually compact (otherwise report only).
+        #[arg(long, default_value_t = false)]
+        apply: bool,
+    },
+
     /// Restore a process from a checkpoint (requires a CRIU-capable host).
     Restore {
         /// Directory containing the CRIU image files.
@@ -291,6 +314,8 @@ fn main() -> anyhow::Result<()> {
             output,
             force,
         } => run_extract(&cfg, &snapshot, &output, force),
+        Command::Gc { apply } => run_gc(&cfg, apply),
+        Command::Compact { snapshot, apply } => run_compact(&cfg, &snapshot, apply),
         Command::Restore {
             input,
             timeout_secs,
@@ -1128,6 +1153,127 @@ fn run_extract(
             println!("  chunks read:    {}", outcome.chunks_read);
             println!("  distinct:       {}", outcome.distinct_chunks);
             println!("  duration:       {} ms", outcome.duration_ms);
+        }
+        Ok::<(), anyhow::Error>(())
+    })
+}
+
+fn run_gc(cfg: &Config, apply: bool) -> anyhow::Result<()> {
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(async {
+        let cas = std::sync::Arc::new(
+            snapforge_storage::Cas::open(cfg.cas_dir())
+                .map_err(|e| anyhow::anyhow!("opening CAS: {e}"))?,
+        );
+        let opts = snapforge_storage::GcOptions {
+            dry_run: !apply,
+            concurrency: cfg.concurrency,
+            ..snapforge_storage::GcOptions::default()
+        };
+        let out = snapforge_storage::gc(cas, &cfg.snapshots_dir(), opts)
+            .await
+            .map_err(|e| anyhow::anyhow!("gc failed: {e}"))?;
+
+        if cfg.json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "dry_run": out.dry_run,
+                    "snapshots": out.snapshots,
+                    "referenced_chunks": out.referenced_chunks,
+                    "cas_chunks": out.cas_chunks,
+                    "unreferenced_chunks": out.unreferenced_chunks,
+                    "unreferenced_bytes": out.unreferenced_bytes,
+                    "removed_chunks": out.removed_chunks,
+                    "removed_bytes": out.removed_bytes,
+                    "removed_temp_files": out.removed_temp_files,
+                    "duration_ms": out.duration_ms,
+                }))?
+            );
+        } else {
+            if out.dry_run {
+                println!("garbage collection (dry run; pass --apply to delete)");
+            } else {
+                println!("garbage collection");
+            }
+            println!("  snapshots:          {}", out.snapshots);
+            println!("  referenced chunks:  {}", out.referenced_chunks);
+            println!("  cas chunks:         {}", out.cas_chunks);
+            println!(
+                "  unreferenced:       {} chunks ({} bytes)",
+                out.unreferenced_chunks, out.unreferenced_bytes
+            );
+            if !out.dry_run {
+                println!(
+                    "  removed chunks:     {} ({} bytes)",
+                    out.removed_chunks, out.removed_bytes
+                );
+                println!("  removed temp files: {}", out.removed_temp_files);
+            }
+            println!("  duration:           {} ms", out.duration_ms);
+        }
+        Ok::<(), anyhow::Error>(())
+    })
+}
+
+fn run_compact(cfg: &Config, snapshot: &str, apply: bool) -> anyhow::Result<()> {
+    let dir = resolve_snapshot(cfg, snapshot);
+    let tip = dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| anyhow::anyhow!("invalid snapshot argument `{snapshot}`"))?
+        .to_string();
+
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(async {
+        let cas = std::sync::Arc::new(
+            snapforge_storage::Cas::open(cfg.cas_dir())
+                .map_err(|e| anyhow::anyhow!("opening CAS: {e}"))?,
+        );
+        let opts = snapforge_storage::CompactOptions {
+            dry_run: !apply,
+            concurrency: cfg.concurrency,
+            ..snapforge_storage::CompactOptions::default()
+        };
+        let out = snapforge_storage::compact_chain(cas, &cfg.snapshots_dir(), &tip, opts)
+            .await
+            .map_err(|e| anyhow::anyhow!("compact failed: {e}"))?;
+
+        if cfg.json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "dry_run": out.dry_run,
+                    "tip": out.tip,
+                    "chain": out.chain,
+                    "removed_snapshots": out.removed_snapshots,
+                    "reclaimed_chunks": out.reclaimed_chunks,
+                    "reclaimed_bytes": out.reclaimed_bytes,
+                    "duration_ms": out.duration_ms,
+                }))?
+            );
+        } else {
+            if out.dry_run {
+                println!("compaction (dry run; pass --apply to modify the store)");
+            } else {
+                println!("compaction");
+            }
+            println!("  tip:                {}", out.tip);
+            println!("  chain:              {}", out.chain.join(" -> "));
+            if out.removed_snapshots.is_empty() {
+                println!("  ancestors removed:  none (already a root)");
+            } else {
+                println!(
+                    "  ancestors removed:  {} ({})",
+                    out.removed_snapshots.len(),
+                    out.removed_snapshots.join(", ")
+                );
+            }
+            println!(
+                "  chunks reclaimed:   {} ({} bytes)",
+                out.reclaimed_chunks, out.reclaimed_bytes
+            );
+            println!("  duration:           {} ms", out.duration_ms);
         }
         Ok::<(), anyhow::Error>(())
     })

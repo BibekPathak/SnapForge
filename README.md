@@ -6,14 +6,15 @@ SnapForge orchestrates **CRIU**-based process checkpoint/restore and adds a
 versioned snapshot format, content-addressed chunk storage, a bounded parallel
 transfer pipeline, and a reproducible benchmark harness.
 
-> **Status: Phase 8 complete.** The workspace, `snapforge doctor`, the
+> **Status: Phase 9 complete.** The workspace, `snapforge doctor`, the
 > deterministic workload harness, the CRIU orchestration engine
 > (`checkpoint`, `restore`, `status`), the versioned snapshot format
 > (`inspect`, `verify`), the content-addressed storage pipeline (`store`),
 > reliable local snapshot transfer (`transfer`), content-addressed incremental
 > snapshots with lineage (`store --parent`, `inspect --chain`, `verify --chain`),
-> snapshot extraction (`extract`), and the reproducible benchmark harness
-> (storage, transfer, incremental) are implemented and tested. See
+> snapshot extraction (`extract`), explicit storage maintenance (`gc`,
+> `compact`), and the reproducible benchmark harness (storage, transfer,
+> incremental) are implemented and tested. See
 > [`docs/performance-report.md`](docs/performance-report.md) for measured
 > results on the current host.
 
@@ -95,6 +96,12 @@ cargo run --release -p snapforge-cli -- --store /tmp/sf-store verify child --cha
 # Extract (restore files from) a stored snapshot back to a directory.
 cargo run --release -p snapforge-cli -- --store /tmp/sf-store extract child --output /tmp/sf-restored
 cargo run --release -p snapforge-cli -- --store /tmp/sf-store extract child --output /tmp/sf-restored --json
+
+# Storage maintenance: report by default, mutate only with --apply.
+cargo run --release -p snapforge-cli -- --store /tmp/sf-store gc
+cargo run --release -p snapforge-cli -- --store /tmp/sf-store gc --apply
+cargo run --release -p snapforge-cli -- --store /tmp/sf-store compact child
+cargo run --release -p snapforge-cli -- --store /tmp/sf-store compact child --apply
 ```
 
 Incremental snapshots are a **storage-layer** feature (content-addressed reuse
@@ -113,7 +120,7 @@ crates/
   snapforge-core      errors, config, logging, host probing, workload harness
   snapforge-engine    CRIU orchestration (checkpoint, restore, status, gating)
   snapforge-format    versioned manifest, validation, atomic publication
-  snapforge-storage   streaming chunker, content-addressed store, pipeline, transfer, extract
+  snapforge-storage   streaming chunker, CAS, pipeline, transfer, extract, gc/compact
   snapforge-cli       the `snapforge` binary
 workloads/
   cpu-memory/         CPU + anonymous-memory workload
@@ -166,6 +173,9 @@ not memory-bandwidth-bound. Always record the medium alongside the numbers.
 - `extract` reassembles stored **files** from content-addressed storage; it does
   not restore a running process. Process restore (`snapforge restore`) requires
   CRIU.
+- `gc` and `compact` are destructive and explicit: both report by default and
+  only mutate the store with `--apply`. `compact` removes ancestor snapshots
+  and the lineage they carry.
 - Storage/transfer/verification features are host-independent and are developed
   and tested regardless of CRIU availability.
 - SnapForge is **not** a sandbox or security boundary. Checkpoints may encode

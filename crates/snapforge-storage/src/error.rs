@@ -36,6 +36,9 @@ pub enum StorageError {
     #[error("extraction failed: {0}")]
     Extract(String),
 
+    #[error("garbage collection failed: {0}")]
+    Gc(String),
+
     #[error("{0}")]
     Other(String),
 }

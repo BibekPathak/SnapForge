@@ -75,13 +75,32 @@ An *identical* re-capture stores zero new bytes and reports a reuse ratio of
 - A cycle is also rejected at capture time: adding a child whose id already
   appears in the parent's chain is refused.
 
-## Compaction analysis (not applied automatically)
+## Compaction analysis and explicit flattening
 
 `analyze_compaction` reports the storage that *could* be reclaimed by flattening
-a chain to its tip: the chunks reachable only through non-tip snapshots. SnapForge
-does not perform compaction automatically. Flattening is only safe when the
-non-tip snapshots are no longer needed independently, and the measured benefit
-must justify the added complexity and the loss of lineage.
+a chain to its tip: the chunks reachable only through non-tip snapshots.
+
+SnapForge never compacts automatically. Phase 9 adds an explicit, opt-in
+command:
+
+```bash
+# Report what flattening `child` would remove (no changes).
+snapforge --store /tmp/store compact child
+
+# Flatten: rewrite `child` as a root, delete its ancestors, sweep the CAS.
+snapforge --store /tmp/store compact child --apply
+
+# Sweep unreferenced chunks without flattening anything (dry run by default).
+snapforge --store /tmp/store gc
+snapforge --store /tmp/store gc --apply
+```
+
+`compact` refuses to run when a snapshot outside the chain still depends on an
+ancestor being removed, and both commands refuse to sweep when any published
+manifest is unreadable or invalid. Flattening is only appropriate when the
+non-tip snapshots are no longer needed independently; it trades lineage for
+storage and must be an explicit operator decision. See
+[`architecture.md`](architecture.md#phase-9-components) for the guarantees.
 
 ## Compatibility constraints for safe reuse
 
