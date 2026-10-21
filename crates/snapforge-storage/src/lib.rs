@@ -10,6 +10,7 @@
 //! - [`extract`] reassembles a stored snapshot's artifacts back onto disk,
 //!   verifying every chunk against its content id as it goes.
 //! - [`gc`] reclaims unreferenced chunks and flattens snapshot chains.
+//! - [`list`] enumerates published snapshots with size and lineage.
 //!
 //! It never reads an entire snapshot into RAM and never exposes a partially
 //! written chunk as valid.
@@ -20,6 +21,7 @@ pub mod error;
 pub mod extract;
 pub mod gc;
 pub mod incremental;
+pub mod list;
 pub mod pipeline;
 pub mod transfer;
 
@@ -31,6 +33,7 @@ pub use gc::{compact_chain, gc, CompactOptions, CompactOutcome, GcOptions, GcOut
 pub use incremental::{
     analyze_compaction, resolve_chain, verify_chain, Chain, CompactionAnalysis, ReuseReport,
 };
+pub use list::{list_snapshots, SnapshotList, SnapshotSummary};
 pub use pipeline::{store_reader, IngestStats, IngestedArtifact, PipelineOptions};
 pub use transfer::{
     transfer_snapshot, CancellationToken, TransferOptions, TransferOutcome, TransferProgress,

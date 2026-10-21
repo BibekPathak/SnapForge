@@ -6,15 +6,16 @@ SnapForge orchestrates **CRIU**-based process checkpoint/restore and adds a
 versioned snapshot format, content-addressed chunk storage, a bounded parallel
 transfer pipeline, and a reproducible benchmark harness.
 
-> **Status: Phase 10 complete.** The workspace, `snapforge doctor`, the
+> **Status: Phase 11 complete.** The workspace, `snapforge doctor`, the
 > deterministic workload harness, the CRIU orchestration engine
 > (`checkpoint`, `restore`, `status`), the versioned snapshot format
 > (`inspect`, `verify`), the content-addressed storage pipeline (`store`),
 > reliable local and HTTP remote snapshot transfer (`transfer`, `serve`),
 > content-addressed incremental snapshots with lineage (`store --parent`,
 > `inspect --chain`, `verify --chain`), snapshot extraction (`extract`),
-> explicit storage maintenance (`gc`, `compact`), and the reproducible benchmark
-> harness (storage, transfer, incremental) are implemented and tested. See
+> a read-only snapshot inventory (`list`), explicit storage maintenance (`gc`,
+> `compact`), and the reproducible benchmark harness (storage, transfer,
+> incremental) are implemented and tested. See
 > [`docs/performance-report.md`](docs/performance-report.md) for measured
 > results on the current host.
 
@@ -101,6 +102,10 @@ cargo run --release -p snapforge-cli -- --store /tmp/sf-store verify child --cha
 # Extract (restore files from) a stored snapshot back to a directory.
 cargo run --release -p snapforge-cli -- --store /tmp/sf-store extract child --output /tmp/sf-restored
 cargo run --release -p snapforge-cli -- --store /tmp/sf-store extract child --output /tmp/sf-restored --json
+
+# Inventory: list stored snapshots, chain depth, and reclaimable storage.
+cargo run --release -p snapforge-cli -- --store /tmp/sf-store list
+cargo run --release -p snapforge-cli -- --store /tmp/sf-store --json list
 
 # Storage maintenance: report by default, mutate only with --apply.
 cargo run --release -p snapforge-cli -- --store /tmp/sf-store gc

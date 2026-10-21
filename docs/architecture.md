@@ -357,6 +357,30 @@ is atomic (`staging` + `rename`); an existing identical snapshot is an idempoten
 success, while a different or invalid one is never overwritten. Request bodies
 are size-limited (`--max-body-mib`).
 
+## Phase 11 components
+
+### `snapforge-storage::list` (snapshot inventory)
+
+`list_snapshots(snapshots_dir)` is a read-only inventory: it answers "what is in
+this store?" without mutating anything. Each published snapshot is reported with
+its path, parent, chain depth, logical bytes, distinct chunks, and the storage
+that flattening its chain to the tip would reclaim. Store-wide totals cover
+logical bytes, physical CAS usage, and unreferenced chunks (the `gc` target).
+
+Design notes:
+
+- **Diagnostic, not strict.** Unlike `gc`, which aborts on any unreadable
+  manifest, `list` reports a corrupt snapshot with `valid = false` and an error
+  string and still inventories the rest of the store. An operator should see
+  broken state, not an inventory that silently omits it.
+- **Broken chains stop, not fail.** A missing parent or a cycle terminates the
+  walk; the snapshot is still listed with the chain it did resolve.
+- **Chain-tip accounting.** Every member of a chain reports the same reclaimable
+  figures as its tip, so `list` and `compact` agree on what a flatten frees.
+
+The CLI exposes this as `snapforge list` (human table or `--json`), replacing the
+last `not_implemented` stub.
+
 ## Later phases (planned)
 
 - **Remote pull / ranged resume**: fetch a snapshot from a remote store and

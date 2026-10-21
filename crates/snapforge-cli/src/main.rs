@@ -249,7 +249,11 @@ enum Command {
         pid: Option<i32>,
     },
 
-    /// List stored snapshots.
+    /// List stored snapshots with size, lineage, and reclaimable storage.
+    ///
+    /// This is a read-only inventory. Sizes are logical (artifact bytes);
+    /// physical CAS usage and what flattening a chain would reclaim are also
+    /// reported. `--json` emits the full inventory.
     List,
 
     /// Run storage-only benchmarks (clearly labeled as non-CRIU experiments).
@@ -366,7 +370,7 @@ fn main() -> anyhow::Result<()> {
             timeout_secs,
         } => run_restore(&cfg, input, timeout_secs),
         Command::Status { pid } => run_status(&cfg, pid),
-        Command::List => not_implemented("list", 3),
+        Command::List => run_list(&cfg),
         Command::Bench {
             size_mib,
             input,
@@ -1350,6 +1354,61 @@ fn run_extract(
     })
 }
 
+fn run_list(cfg: &Config) -> anyhow::Result<()> {
+    let list = snapforge_storage::list_snapshots(&cfg.snapshots_dir())
+        .map_err(|e| anyhow::anyhow!("listing snapshots: {e}"))?;
+
+    if cfg.json {
+        println!("{}", serde_json::to_string_pretty(&list)?);
+        return Ok(());
+    }
+
+    if list.snapshots.is_empty() {
+        println!("no snapshots in {}", cfg.snapshots_dir().display());
+        return Ok(());
+    }
+
+    println!("snapshots in {}", cfg.snapshots_dir().display());
+    println!(
+        "{:<24} {:>10} {:>8} {:>6} {:>10}  STATE",
+        "ID", "BYTES", "CHUNKS", "DEPTH", "RECLAIM"
+    );
+    for s in &list.snapshots {
+        let state = if !s.valid {
+            "INVALID".to_string()
+        } else if s.is_tip {
+            if s.reclaimable_bytes > 0 {
+                format!("tip (compacting frees {} B)", s.reclaimable_bytes)
+            } else {
+                "tip".to_string()
+            }
+        } else {
+            let tip = &s.chain_tip;
+            format!("ancestor of {tip}")
+        };
+        println!(
+            "{:<24} {:>10} {:>8} {:>6} {:>10}  {}",
+            s.id, s.total_bytes, s.distinct_chunks, s.chain_depth, s.reclaimable_bytes, state
+        );
+        if let Some(err) = &s.error {
+            println!("    error: {err}");
+        }
+    }
+
+    println!();
+    println!("  snapshots:       {}", list.count);
+    println!("  logical bytes:   {}", list.total_logical_bytes);
+    println!(
+        "  CAS:             {} chunks, {} bytes",
+        list.cas_chunks, list.cas_bytes
+    );
+    println!(
+        "  unreferenced:    {} chunks, {} bytes (run `snapforge gc`)",
+        list.unreferenced_chunks, list.unreferenced_bytes
+    );
+    Ok(())
+}
+
 fn run_gc(cfg: &Config, apply: bool) -> anyhow::Result<()> {
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async {
@@ -1541,11 +1600,4 @@ fn which(program: &str) -> Option<PathBuf> {
         }
     }
     None
-}
-
-fn not_implemented(name: &str, phase: u8) -> anyhow::Result<()> {
-    anyhow::bail!(
-        "`{name}` is not implemented yet (planned for Phase {phase}). \
-         Run `snapforge doctor` to inspect host capabilities."
-    )
 }

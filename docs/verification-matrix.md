@@ -132,6 +132,11 @@ Legend: **ran** = executed here and passed; **skipped** = cannot run here;
 | remote | protocol helpers + constant-time compare (unit) | 10 | ran |
 | remote | CLI remote push + idempotent rerun | 10 | ran |
 | remote | CLI remote auth failure then success | 10 | ran |
+| list | empty store lists nothing | 11 | ran |
+| list | JSON summarizes chain depth and reclaimable bytes | 11 | ran |
+| list | invalid manifest flagged without failing | 11 | ran |
+| list | unreferenced chunks reported | 11 | ran |
+| list | broken/cyclic chains terminate cleanly (unit) | 11 | ran |
 | engine | **real** CRIU capture/restore | 2 | **skipped: kernel lacks `CONFIG_CHECKPOINT_RESTORE`** |
 
 ## How to reproduce checks
@@ -194,6 +199,10 @@ cargo run -p snapforge-cli -- --store /tmp/sf-store6 --chunk-size 65536 \
 cargo run -p snapforge-cli -- --store /tmp/sf-store6 inspect child --chain
 cargo run -p snapforge-cli -- --store /tmp/sf-store6 verify child --chain --require-chunks
 
+# Inventory: what is in the store, and what a flatten would reclaim.
+cargo run -p snapforge-cli -- --store /tmp/sf-store6 list
+cargo run -p snapforge-cli -- --store /tmp/sf-store6 --json list
+
 # Storage maintenance: both report by default; --apply mutates the store.
 cargo run -p snapforge-cli -- --store /tmp/sf-store6 gc
 cargo run -p snapforge-cli -- --store /tmp/sf-store6 gc --apply
@@ -207,4 +216,4 @@ cargo run -p snapforge-cli -- checkpoint --pid $$ --output /tmp/sf-ckpt
 cargo run -p snapforge-cli -- restore --input /tmp/sf-ckpt
 ```
 
-Total automated tests: **158** (13 core, 18 engine, 24 format, 64 storage, 15 remote, 24 CLI integration; property tests are included in the format and storage totals). Benchmark result records are validated separately against `benchmarks/schemas/result.schema.json`.
+Total automated tests: **166** (13 core, 18 engine, 24 format, 68 storage, 15 remote, 28 CLI integration; property tests are included in the format and storage totals). Benchmark result records are validated separately against `benchmarks/schemas/result.schema.json`.
