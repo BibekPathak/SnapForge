@@ -9,7 +9,7 @@ use snapforge_format::{
     publish, Compatibility, Manifest, SnapshotStats, ValidateOptions, WorkloadInfo, FORMAT_VERSION,
 };
 use snapforge_remote::{
-    health, push_snapshot, serve, RemoteOptions, ServerOptions, PROTOCOL_VERSION,
+    health, push_snapshot, serve, PushOptions, RemoteSession, ServerOptions, PROTOCOL_VERSION,
 };
 use snapforge_storage::{extract_snapshot, store_reader, Cas, ExtractOptions, PipelineOptions};
 use tokio::net::TcpListener;
@@ -121,7 +121,7 @@ async fn push_copies_snapshot_and_remote_extracts_byte_for_byte() {
         &src.join("snapshots"),
         &endpoint(addr),
         "snap",
-        RemoteOptions::default(),
+        PushOptions::default(),
     )
     .await
     .unwrap();
@@ -180,7 +180,7 @@ async fn push_is_idempotent() {
         &src.join("snapshots"),
         &url,
         "snap",
-        RemoteOptions::default(),
+        PushOptions::default(),
     )
     .await
     .unwrap();
@@ -191,7 +191,7 @@ async fn push_is_idempotent() {
         &src.join("snapshots"),
         &url,
         "snap",
-        RemoteOptions::default(),
+        PushOptions::default(),
     )
     .await
     .unwrap();
@@ -224,7 +224,7 @@ async fn push_fails_on_missing_source_chunk_without_publishing() {
         &src.join("snapshots"),
         &endpoint(addr),
         "snap",
-        RemoteOptions::default(),
+        PushOptions::default(),
     )
     .await
     .unwrap_err();
@@ -252,7 +252,7 @@ async fn push_requires_bearer_token_when_configured() {
         &src.join("snapshots"),
         &url,
         "snap",
-        RemoteOptions::default(),
+        PushOptions::default(),
     )
     .await
     .unwrap_err();
@@ -263,9 +263,12 @@ async fn push_requires_bearer_token_when_configured() {
         &src.join("snapshots"),
         &url,
         "snap",
-        RemoteOptions {
-            token: Some("s3cret".into()),
-            ..RemoteOptions::default()
+        PushOptions {
+            session: RemoteSession {
+                token: Some("s3cret".into()),
+                ..RemoteSession::default()
+            },
+            ..PushOptions::default()
         },
     )
     .await
@@ -310,7 +313,7 @@ async fn push_conflicts_when_remote_has_a_different_snapshot_with_same_id() {
         &a.join("snapshots"),
         &url,
         "dup",
-        RemoteOptions::default(),
+        PushOptions::default(),
     )
     .await
     .unwrap();
@@ -320,7 +323,7 @@ async fn push_conflicts_when_remote_has_a_different_snapshot_with_same_id() {
         &b.join("snapshots"),
         &url,
         "dup",
-        RemoteOptions::default(),
+        PushOptions::default(),
     )
     .await
     .unwrap_err();
@@ -348,7 +351,7 @@ async fn verify_existing_repairs_a_corrupt_remote_chunk() {
         &src.join("snapshots"),
         &url,
         "snap",
-        RemoteOptions::default(),
+        PushOptions::default(),
     )
     .await
     .unwrap();
@@ -362,9 +365,9 @@ async fn verify_existing_repairs_a_corrupt_remote_chunk() {
         &src.join("snapshots"),
         &url,
         "snap",
-        RemoteOptions {
+        PushOptions {
             verify_existing: true,
-            ..RemoteOptions::default()
+            ..PushOptions::default()
         },
     )
     .await
@@ -383,7 +386,7 @@ async fn health_reports_protocol_version() {
     let dst = tmp.path().join("dst");
     let (addr, handle) = start_server(&dst, None).await;
 
-    let body = health(&endpoint(addr), &RemoteOptions::default())
+    let body = health(&endpoint(addr), &RemoteSession::default())
         .await
         .unwrap();
     assert!(

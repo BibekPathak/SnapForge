@@ -137,6 +137,14 @@ Legend: **ran** = executed here and passed; **skipped** = cannot run here;
 | list | invalid manifest flagged without failing | 11 | ran |
 | list | unreferenced chunks reported | 11 | ran |
 | list | broken/cyclic chains terminate cleanly (unit) | 11 | ran |
+| pull | pull copies a snapshot; local store extracts byte-for-byte | 12 | ran |
+| pull | pull is idempotent on rerun | 12 | ran |
+| pull | pull resumes a partially downloaded chunk via Range | 12 | ran |
+| pull | corrupt remote chunk fails without publishing | 12 | ran |
+| pull | bearer token required when configured | 12 | ran |
+| pull | missing remote snapshot errors cleanly | 12 | ran |
+| pull | server returns 206 + Content-Range for a range request | 12 | ran |
+| pull | CLI remote pull + extract + idempotent rerun | 12 | ran |
 | engine | **real** CRIU capture/restore | 2 | **skipped: kernel lacks `CONFIG_CHECKPOINT_RESTORE`** |
 
 ## How to reproduce checks
@@ -181,6 +189,10 @@ cargo run -p snapforge-cli -- --store /tmp/sf-store4b verify ckpt-1 --require-ch
 cargo run -p snapforge-cli -- --store /tmp/sf-store4b serve --bind 127.0.0.1:8080
 cargo run -p snapforge-cli -- --store /tmp/sf-store4 transfer ckpt-1 http://127.0.0.1:8080
 cargo run -p snapforge-cli -- --store /tmp/sf-store4b verify ckpt-1 --require-chunks
+
+# Remote pull: fetch a snapshot from a serving store into an empty one.
+cargo run -p snapforge-cli -- --store /tmp/sf-store4c pull ckpt-1 http://127.0.0.1:8080
+cargo run -p snapforge-cli -- --store /tmp/sf-store4c verify ckpt-1 --require-chunks
 # With a shared bearer token:
 cargo run -p snapforge-cli -- --store /tmp/sf-store4b serve --bind 127.0.0.1:8080 --token secret
 cargo run -p snapforge-cli -- --store /tmp/sf-store4 transfer ckpt-1 http://127.0.0.1:8080 --token secret
@@ -216,4 +228,4 @@ cargo run -p snapforge-cli -- checkpoint --pid $$ --output /tmp/sf-ckpt
 cargo run -p snapforge-cli -- restore --input /tmp/sf-ckpt
 ```
 
-Total automated tests: **166** (13 core, 18 engine, 24 format, 68 storage, 15 remote, 28 CLI integration; property tests are included in the format and storage totals). Benchmark result records are validated separately against `benchmarks/schemas/result.schema.json`.
+Total automated tests: **175** (13 core, 18 engine, 24 format, 68 storage, 23 remote, 29 CLI integration; property tests are included in the format and storage totals). Benchmark result records are validated separately against `benchmarks/schemas/result.schema.json`.

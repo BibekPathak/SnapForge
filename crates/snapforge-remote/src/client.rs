@@ -8,66 +8,55 @@
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
-use reqwest::{Client, RequestBuilder, Response, StatusCode};
 use snapforge_format::{Manifest, ValidateOptions};
-use snapforge_storage::{CancellationToken, Cas};
+use snapforge_storage::Cas;
 use tokio::sync::Semaphore;
 
 use crate::error::{RemoteError, Result};
-use crate::protocol::{chunk_url, health_url, snapshot_url};
+use crate::http::{
+    retry_get_chunk, retry_get_manifest, retry_head, retry_put_chunk, retry_put_manifest,
+    status_error, with_auth, ChunkProbe, RemoteSession,
+};
+use crate::protocol::{chunk_url, health_url};
 
 /// Options controlling a remote push.
 #[derive(Debug, Clone)]
-pub struct RemoteOptions {
+pub struct PushOptions {
     /// Maximum number of chunk uploads in flight.
     pub concurrency: usize,
-    /// Maximum retry attempts per request (0 means a single attempt).
-    pub max_retries: u32,
-    /// Base delay for exponential backoff between retries.
-    pub retry_backoff: Duration,
-    /// Per-request timeout.
-    pub request_timeout: Duration,
-    /// Optional bearer token sent with every request.
-    pub token: Option<String>,
     /// Fetch and hash chunks the remote reports as already present.
     pub verify_existing: bool,
-    /// Cancellation token.
-    pub cancel: CancellationToken,
+    /// Retries, timeout, auth, and cancellation.
+    pub session: RemoteSession,
 }
 
-impl Default for RemoteOptions {
+impl Default for PushOptions {
     fn default() -> Self {
-        RemoteOptions {
+        PushOptions {
             concurrency: 4,
-            max_retries: 3,
-            retry_backoff: Duration::from_millis(50),
-            request_timeout: Duration::from_secs(30),
-            token: None,
             verify_existing: false,
-            cancel: CancellationToken::new(),
+            session: RemoteSession::default(),
         }
     }
 }
 
-impl RemoteOptions {
+impl PushOptions {
     fn validate(&self) -> Result<()> {
         if self.concurrency == 0 {
             return Err(RemoteError::Config("concurrency must be >= 1".into()));
         }
-        if self.request_timeout.is_zero() {
-            return Err(RemoteError::Config(
-                "request_timeout must be non-zero".into(),
-            ));
-        }
-        Ok(())
+        self.session.validate()
     }
 }
 
+/// Backward-compatible alias for the Phase 10 push options type.
+pub type RemoteOptions = PushOptions;
+
 /// The result of a remote push.
 #[derive(Debug, Clone)]
-pub struct RemoteOutcome {
+pub struct PushOutcome {
     /// Snapshot id pushed.
     pub snapshot_id: String,
     /// Normalized remote endpoint.
@@ -86,18 +75,21 @@ pub struct RemoteOutcome {
     pub duration_ms: u64,
 }
 
+/// Backward-compatible alias for the Phase 10 push outcome type.
+pub type RemoteOutcome = PushOutcome;
+
 /// Push a published snapshot from a local store to a remote SnapForge server.
 pub async fn push_snapshot(
     source_cas: Arc<Cas>,
     source_snapshots_dir: &Path,
     endpoint: &str,
     snapshot_id: &str,
-    opts: RemoteOptions,
-) -> Result<RemoteOutcome> {
+    opts: PushOptions,
+) -> Result<PushOutcome> {
     opts.validate()?;
-    opts.cancel.check()?;
+    opts.session.cancel.check()?;
     let started = Instant::now();
-    let base = normalize_endpoint(endpoint)?;
+    let base = crate::http::normalize_endpoint(endpoint)?;
 
     let manifest = snapforge_format::load(&source_snapshots_dir.join(snapshot_id))?;
     snapforge_format::validate(
@@ -111,19 +103,15 @@ pub async fn push_snapshot(
     let chunk_lengths = manifest.chunk_lengths();
     let chunks_total = chunk_lengths.len() as u64;
 
-    let client = Client::builder()
-        .timeout(opts.request_timeout)
-        .user_agent(concat!("snapforge-remote/", env!("CARGO_PKG_VERSION")))
-        .build()?;
-
+    let client = opts.session.client()?;
     let retries = Arc::new(AtomicU64::new(0));
 
     // Early conflict check. When `verify_existing` is set we deliberately
     // continue even for an identical manifest so every chunk is re-checked.
-    match retry_get_manifest(&client, &base, snapshot_id, &opts, &retries).await? {
+    match retry_get_manifest(&client, &base, snapshot_id, &opts.session, &retries).await? {
         Some(existing) if existing == manifest => {
             if !opts.verify_existing {
-                return Ok(RemoteOutcome {
+                return Ok(PushOutcome {
                     snapshot_id: snapshot_id.to_string(),
                     endpoint: base,
                     chunks_total,
@@ -167,10 +155,11 @@ pub async fn push_snapshot(
         let bytes = bytes.clone();
 
         join_set.spawn(async move {
-            let mut present = retry_head(&client, &chunk_url(&base, &id), &opts, &retries).await?;
+            let url = chunk_url(&base, &id);
+            let mut present = retry_head(&client, &url, &opts.session, &retries).await?;
 
             if present && opts.verify_existing {
-                match retry_get_chunk(&client, &chunk_url(&base, &id), &opts, &retries).await? {
+                match retry_get_chunk(&client, &url, &opts.session, &retries).await? {
                     ChunkProbe::Present(remote) => {
                         present = blake3::hash(&remote).to_hex().to_string() == id;
                     }
@@ -197,7 +186,7 @@ pub async fn push_snapshot(
                 )));
             }
 
-            retry_put_chunk(&client, &chunk_url(&base, &id), &data, &opts, &retries).await?;
+            retry_put_chunk(&client, &url, &data, &opts.session, &retries).await?;
             uploaded.fetch_add(1, Ordering::SeqCst);
             bytes.fetch_add(length, Ordering::SeqCst);
             drop(permit);
@@ -209,29 +198,29 @@ pub async fn push_snapshot(
         match joined {
             Ok(Ok(())) => {}
             Ok(Err(e)) => {
-                opts.cancel.cancel();
+                opts.session.cancel.cancel();
                 return Err(e);
             }
             Err(e) => {
-                opts.cancel.cancel();
+                opts.session.cancel.cancel();
                 return Err(RemoteError::Join(e.to_string()));
             }
         }
     }
 
-    opts.cancel.check()?;
+    opts.session.cancel.check()?;
 
     let body = snapforge_format::to_bytes(&manifest)?;
     retry_put_manifest(
         &client,
-        &snapshot_url(&base, snapshot_id),
+        &crate::protocol::snapshot_url(&base, snapshot_id),
         &body,
-        &opts,
+        &opts.session,
         &retries,
     )
     .await?;
 
-    Ok(RemoteOutcome {
+    Ok(PushOutcome {
         snapshot_id: snapshot_id.to_string(),
         endpoint: base,
         chunks_total,
@@ -244,270 +233,31 @@ pub async fn push_snapshot(
 }
 
 /// Probe a remote endpoint's `/v1/health` route.
-pub async fn health(endpoint: &str, opts: &RemoteOptions) -> Result<String> {
-    let base = normalize_endpoint(endpoint)?;
-    let client = Client::builder().timeout(opts.request_timeout).build()?;
-    let resp = with_auth(client.get(health_url(&base)), opts.token.as_deref())
+pub async fn health(endpoint: &str, session: &RemoteSession) -> Result<String> {
+    let base = crate::http::normalize_endpoint(endpoint)?;
+    let client = session.client()?;
+    let url = health_url(&base);
+    let resp = with_auth(client.get(&url), session.token.as_deref())
         .send()
         .await?;
     if !resp.status().is_success() {
-        return Err(status_error(resp, &health_url(&base)).await);
+        return Err(status_error(resp, &url).await);
     }
     Ok(resp.text().await?)
 }
 
-fn normalize_endpoint(endpoint: &str) -> Result<String> {
-    let trimmed = endpoint.trim().trim_end_matches('/');
-    if trimmed.is_empty() {
-        return Err(RemoteError::Config("endpoint must not be empty".into()));
-    }
-    if trimmed.starts_with("https://") {
-        return Err(RemoteError::Config(
-            "TLS is not built in; expose the server over http:// behind a TLS-terminating proxy"
-                .into(),
-        ));
-    }
-    if !trimmed.starts_with("http://") {
-        return Err(RemoteError::Config(
-            "endpoint must start with http://".into(),
-        ));
-    }
-    Ok(trimmed.to_string())
-}
-
-fn with_auth(req: RequestBuilder, token: Option<&str>) -> RequestBuilder {
-    match token {
-        Some(token) => req.bearer_auth(token),
-        None => req,
-    }
-}
-
-async fn status_error(resp: Response, endpoint: &str) -> RemoteError {
-    let status = resp.status();
-    if status == StatusCode::UNAUTHORIZED {
-        return RemoteError::Unauthorized;
-    }
-    let body = resp.text().await.unwrap_or_default();
-    let body = if body.len() > 512 {
-        format!("{}…", &body[..512])
-    } else {
-        body
-    };
-    RemoteError::Status {
-        status: status.as_u16(),
-        endpoint: endpoint.to_string(),
-        body,
-    }
-}
-
-fn backoff(opts: &RemoteOptions, attempt: u32) -> Duration {
-    opts.retry_backoff.saturating_mul(1u32 << attempt.min(6))
-}
-
-async fn sleep_or_cancel(dur: Duration, cancel: &CancellationToken) -> Result<()> {
-    let deadline = Instant::now() + dur;
-    loop {
-        cancel.check()?;
-        let now = Instant::now();
-        if now >= deadline {
-            return Ok(());
-        }
-        let step = (deadline - now).min(Duration::from_millis(50));
-        tokio::time::sleep(step).await;
-    }
-}
-
-async fn retry_head(
-    client: &Client,
-    url: &str,
-    opts: &RemoteOptions,
-    retries: &AtomicU64,
-) -> Result<bool> {
-    let mut attempt = 0u32;
-    loop {
-        opts.cancel.check()?;
-        match head_once(client, url, opts.token.as_deref()).await {
-            Ok(v) => return Ok(v),
-            Err(e) if e.is_retryable() && attempt < opts.max_retries => {
-                attempt += 1;
-                retries.fetch_add(1, Ordering::SeqCst);
-                sleep_or_cancel(backoff(opts, attempt), &opts.cancel).await?;
-            }
-            Err(e) => return Err(e),
-        }
-    }
-}
-
-async fn head_once(client: &Client, url: &str, token: Option<&str>) -> Result<bool> {
-    let resp = with_auth(client.head(url), token).send().await?;
-    match resp.status() {
-        StatusCode::OK | StatusCode::NO_CONTENT => Ok(true),
-        StatusCode::NOT_FOUND => Ok(false),
-        _ => Err(status_error(resp, url).await),
-    }
-}
-
-enum ChunkProbe {
-    Present(Vec<u8>),
-    Missing,
-    Corrupt,
-}
-
-async fn retry_get_chunk(
-    client: &Client,
-    url: &str,
-    opts: &RemoteOptions,
-    retries: &AtomicU64,
-) -> Result<ChunkProbe> {
-    let mut attempt = 0u32;
-    loop {
-        opts.cancel.check()?;
-        match get_chunk_once(client, url, opts.token.as_deref()).await {
-            Ok(v) => return Ok(v),
-            Err(e) if e.is_retryable() && attempt < opts.max_retries => {
-                attempt += 1;
-                retries.fetch_add(1, Ordering::SeqCst);
-                sleep_or_cancel(backoff(opts, attempt), &opts.cancel).await?;
-            }
-            Err(e) => return Err(e),
-        }
-    }
-}
-
-async fn get_chunk_once(client: &Client, url: &str, token: Option<&str>) -> Result<ChunkProbe> {
-    let resp = with_auth(client.get(url), token).send().await?;
-    match resp.status() {
-        StatusCode::OK => Ok(ChunkProbe::Present(resp.bytes().await?.to_vec())),
-        StatusCode::NOT_FOUND => Ok(ChunkProbe::Missing),
-        StatusCode::UNPROCESSABLE_ENTITY => Ok(ChunkProbe::Corrupt),
-        _ => Err(status_error(resp, url).await),
-    }
-}
-
-async fn retry_put_chunk(
-    client: &Client,
-    url: &str,
-    data: &[u8],
-    opts: &RemoteOptions,
-    retries: &AtomicU64,
-) -> Result<()> {
-    let mut attempt = 0u32;
-    loop {
-        opts.cancel.check()?;
-        match put_chunk_once(client, url, data, opts.token.as_deref()).await {
-            Ok(()) => return Ok(()),
-            Err(e) if e.is_retryable() && attempt < opts.max_retries => {
-                attempt += 1;
-                retries.fetch_add(1, Ordering::SeqCst);
-                sleep_or_cancel(backoff(opts, attempt), &opts.cancel).await?;
-            }
-            Err(e) => return Err(e),
-        }
-    }
-}
-
-async fn put_chunk_once(
-    client: &Client,
-    url: &str,
-    data: &[u8],
-    token: Option<&str>,
-) -> Result<()> {
-    let req = client
-        .put(url)
-        .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
-        .body(data.to_vec());
-    let resp = with_auth(req, token).send().await?;
-    match resp.status() {
-        StatusCode::OK | StatusCode::CREATED | StatusCode::NO_CONTENT => Ok(()),
-        _ => Err(status_error(resp, url).await),
-    }
-}
-
-async fn retry_put_manifest(
-    client: &Client,
-    url: &str,
-    body: &[u8],
-    opts: &RemoteOptions,
-    retries: &AtomicU64,
-) -> Result<()> {
-    let mut attempt = 0u32;
-    loop {
-        opts.cancel.check()?;
-        match put_manifest_once(client, url, body, opts.token.as_deref()).await {
-            Ok(()) => return Ok(()),
-            Err(e) if e.is_retryable() && attempt < opts.max_retries => {
-                attempt += 1;
-                retries.fetch_add(1, Ordering::SeqCst);
-                sleep_or_cancel(backoff(opts, attempt), &opts.cancel).await?;
-            }
-            Err(e) => {
-                // A 409 means a different snapshot already occupies the id;
-                // surface it as a protocol conflict rather than a raw status.
-                if matches!(e, RemoteError::Status { status: 409, .. }) {
-                    return Err(RemoteError::Protocol(
-                        "remote already has a different snapshot with this id".into(),
-                    ));
-                }
-                return Err(e);
-            }
-        }
-    }
-}
-
-async fn put_manifest_once(
-    client: &Client,
-    url: &str,
-    body: &[u8],
-    token: Option<&str>,
-) -> Result<()> {
-    let req = client
-        .put(url)
-        .header(reqwest::header::CONTENT_TYPE, "application/json")
-        .body(body.to_vec());
-    let resp = with_auth(req, token).send().await?;
-    match resp.status() {
-        StatusCode::OK | StatusCode::CREATED => Ok(()),
-        _ => Err(status_error(resp, url).await),
-    }
-}
-
-async fn retry_get_manifest(
-    client: &Client,
-    base: &str,
+/// Fetch and deserialize a snapshot's manifest from a remote endpoint.
+pub async fn fetch_manifest(
+    endpoint: &str,
     snapshot_id: &str,
-    opts: &RemoteOptions,
-    retries: &AtomicU64,
-) -> Result<Option<Manifest>> {
-    let url = snapshot_url(base, snapshot_id);
-    let mut attempt = 0u32;
-    loop {
-        opts.cancel.check()?;
-        match get_manifest_once(client, &url, opts.token.as_deref()).await {
-            Ok(v) => return Ok(v),
-            Err(e) if e.is_retryable() && attempt < opts.max_retries => {
-                attempt += 1;
-                retries.fetch_add(1, Ordering::SeqCst);
-                sleep_or_cancel(backoff(opts, attempt), &opts.cancel).await?;
-            }
-            Err(e) => return Err(e),
-        }
-    }
-}
-
-async fn get_manifest_once(
-    client: &Client,
-    url: &str,
-    token: Option<&str>,
-) -> Result<Option<Manifest>> {
-    let resp = with_auth(client.get(url), token).send().await?;
-    match resp.status() {
-        StatusCode::OK => {
-            let bytes = resp.bytes().await?;
-            Ok(Some(snapforge_format::from_bytes(&bytes)?))
-        }
-        StatusCode::NOT_FOUND => Ok(None),
-        _ => Err(status_error(resp, url).await),
-    }
+    session: &RemoteSession,
+) -> Result<Manifest> {
+    let base = crate::http::normalize_endpoint(endpoint)?;
+    let client = session.client()?;
+    let retries = AtomicU64::new(0);
+    retry_get_manifest(&client, &base, snapshot_id, session, &retries)
+        .await?
+        .ok_or_else(|| RemoteError::Protocol(format!("remote has no snapshot `{snapshot_id}`")))
 }
 
 #[cfg(test)]
@@ -515,30 +265,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn normalize_endpoint_strips_trailing_slash() {
-        assert_eq!(
-            normalize_endpoint("http://127.0.0.1:8080/").unwrap(),
-            "http://127.0.0.1:8080"
-        );
-        assert!(normalize_endpoint("https://example.test").is_err());
-    }
-
-    #[test]
-    fn normalize_endpoint_rejects_bad_scheme() {
-        assert!(normalize_endpoint("").is_err());
-        assert!(normalize_endpoint("/tmp/store").is_err());
-        assert!(normalize_endpoint("ftp://example.test").is_err());
-    }
-
-    #[test]
-    fn options_reject_zero_concurrency_and_timeout() {
-        let mut o = RemoteOptions {
+    fn push_options_reject_zero_concurrency() {
+        let o = PushOptions {
             concurrency: 0,
-            ..RemoteOptions::default()
+            ..PushOptions::default()
         };
         assert!(o.validate().is_err());
-        o.concurrency = 4;
-        o.request_timeout = Duration::ZERO;
+    }
+
+    #[test]
+    fn push_options_reject_zero_timeout() {
+        let mut o = PushOptions::default();
+        o.session.request_timeout = std::time::Duration::ZERO;
         assert!(o.validate().is_err());
     }
 }

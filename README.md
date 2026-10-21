@@ -6,16 +6,16 @@ SnapForge orchestrates **CRIU**-based process checkpoint/restore and adds a
 versioned snapshot format, content-addressed chunk storage, a bounded parallel
 transfer pipeline, and a reproducible benchmark harness.
 
-> **Status: Phase 11 complete.** The workspace, `snapforge doctor`, the
+> **Status: Phase 12 complete.** The workspace, `snapforge doctor`, the
 > deterministic workload harness, the CRIU orchestration engine
 > (`checkpoint`, `restore`, `status`), the versioned snapshot format
 > (`inspect`, `verify`), the content-addressed storage pipeline (`store`),
-> reliable local and HTTP remote snapshot transfer (`transfer`, `serve`),
-> content-addressed incremental snapshots with lineage (`store --parent`,
-> `inspect --chain`, `verify --chain`), snapshot extraction (`extract`),
-> a read-only snapshot inventory (`list`), explicit storage maintenance (`gc`,
-> `compact`), and the reproducible benchmark harness (storage, transfer,
-> incremental) are implemented and tested. See
+> reliable local and HTTP remote snapshot transfer, push and pull (`transfer`,
+> `serve`, `pull`), content-addressed incremental snapshots with lineage
+> (`store --parent`, `inspect --chain`, `verify --chain`), snapshot extraction
+> (`extract`), a read-only snapshot inventory (`list`), explicit storage
+> maintenance (`gc`, `compact`), and the reproducible benchmark harness
+> (storage, transfer, incremental) are implemented and tested. See
 > [`docs/performance-report.md`](docs/performance-report.md) for measured
 > results on the current host.
 
@@ -90,6 +90,10 @@ cargo run --release -p snapforge-cli -- --store /tmp/sf-store-b verify ckpt-1 --
 cargo run --release -p snapforge-cli -- --store /tmp/sf-store-b serve --bind 127.0.0.1:8080
 cargo run --release -p snapforge-cli -- --store /tmp/sf-store transfer ckpt-1 http://127.0.0.1:8080
 cargo run --release -p snapforge-cli -- --store /tmp/sf-store-b verify ckpt-1 --require-chunks
+
+# Pull a snapshot from a serving store (resumes interrupted chunk downloads).
+cargo run --release -p snapforge-cli -- --store /tmp/sf-store-c pull ckpt-1 http://127.0.0.1:8080
+cargo run --release -p snapforge-cli -- --store /tmp/sf-store-c verify ckpt-1 --require-chunks
 
 # Incremental: capture a child linked to a parent, then inspect/verify the chain.
 cargo run --release -p snapforge-cli -- --store /tmp/sf-store --chunk-size 65536 \
@@ -187,10 +191,10 @@ not memory-bandwidth-bound. Always record the medium alongside the numbers.
 - `gc` and `compact` are destructive and explicit: both report by default and
   only mutate the store with `--apply`. `compact` removes ancestor snapshots
   and the lineage they carry.
-- Remote transfer is **plain HTTP** and currently **push-only**. Terminate TLS
-  at a reverse proxy for untrusted networks and set a bearer token
-  (`--token` / `SNAPFORGE_REMOTE_TOKEN`) when peers are not fully trusted. The
-  token is a single shared secret, not per-user authorization.
+- Remote transfer is **plain HTTP** in both directions (`transfer` push and
+  `pull`). Terminate TLS at a reverse proxy for untrusted networks and set a
+  bearer token (`--token` / `SNAPFORGE_REMOTE_TOKEN`) when peers are not fully
+  trusted. The token is a single shared secret, not per-user authorization.
 - Storage/transfer/verification features are host-independent and are developed
   and tested regardless of CRIU availability.
 - SnapForge is **not** a sandbox or security boundary. Checkpoints may encode

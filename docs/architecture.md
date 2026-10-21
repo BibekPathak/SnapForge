@@ -381,10 +381,36 @@ Design notes:
 The CLI exposes this as `snapforge list` (human table or `--json`), replacing the
 last `not_implemented` stub.
 
+## Phase 12 components
+
+### Remote pull with ranged resume
+
+`snapforge-remote` gains the mirror of push: `pull_snapshot(endpoint, id, ...)`
+fetches a remote manifest and every referenced chunk into a local store. The CLI
+exposes it as `snapforge pull <snapshot> <endpoint>`.
+
+Client guarantees mirror the push path: bounded concurrency, integrity checks
+before any chunk is written, idempotent skipping of chunks the local store
+already holds and verifies, bounded retries with backoff, cancellation, and
+atomic publication (`staging` + `rename`) only after every chunk is present.
+
+**Ranged resume.** An interrupted chunk download may leave a `.part-<id>`
+scratch file. On the next pull, the client resumes from the bytes it already
+has, requesting only the missing tail with `Range: bytes=<start>-`. The server
+answers `206 Partial Content` with `Content-Range`; a malformed, multi-part, or
+unsatisfiable range is deliberately ignored (the server sends the whole body) so
+a hostile or buggy client can never widen a range. Resumed chunks are counted in
+`chunks_resumed`. A partial file is deleted once the chunk verifies, so stale
+scratch state never accumulates.
+
+Both directions now share one code path for retries, backoff, cancellation, and
+status classification (`snapforge-remote::http`); the direction-specific
+`PushOptions` / `PullOptions` embed a common `RemoteSession` (retries, timeout,
+token, cancellation). `RemoteOptions` / `RemoteOutcome` remain as aliases of the
+push types from Phase 10.
+
 ## Later phases (planned)
 
-- **Remote pull / ranged resume**: fetch a snapshot from a remote store and
-  resume partially transferred chunks with HTTP range requests.
 - **TLS and richer auth**: terminate TLS in-process and support scoped tokens
   or mTLS instead of a single shared bearer token.
 

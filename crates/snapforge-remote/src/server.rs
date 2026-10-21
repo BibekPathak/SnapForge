@@ -243,14 +243,65 @@ async fn get_chunk(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
     headers: HeaderMap,
-) -> std::result::Result<([(header::HeaderName, &'static str); 1], Vec<u8>), ApiError> {
+) -> std::result::Result<Response, ApiError> {
     state.authorize(&headers)?;
+    if !is_hex64(&id) {
+        return Err(ApiError::not_found(format!("chunk {id} not found")));
+    }
     let cas = state.cas.clone();
     let id_for_task = id.clone();
     let bytes = tokio::task::spawn_blocking(move || cas.get(&id_for_task))
         .await
         .map_err(|e| ApiError::internal(format!("join error: {e}")))??;
-    Ok(([(header::CONTENT_TYPE, "application/octet-stream")], bytes))
+
+    // Range support enables resuming a partially downloaded chunk. We accept a
+    // single `bytes=<start>-` form; anything else falls back to the full body.
+    match parse_range(
+        headers.get(header::RANGE).and_then(|v| v.to_str().ok()),
+        bytes.len(),
+    ) {
+        Some((start, end)) => {
+            let total = bytes.len() as u64;
+            let slice = bytes[start as usize..=end as usize].to_vec();
+            let mut resp = (StatusCode::PARTIAL_CONTENT, slice).into_response();
+            let range = format!("bytes {start}-{end}/{total}");
+            if let Ok(value) = range.parse() {
+                resp.headers_mut().insert(header::CONTENT_RANGE, value);
+            }
+            resp.headers_mut().insert(
+                header::CONTENT_TYPE,
+                axum::http::HeaderValue::from_static("application/octet-stream"),
+            );
+            Ok(resp)
+        }
+        None => Ok(([(header::CONTENT_TYPE, "application/octet-stream")], bytes).into_response()),
+    }
+}
+
+/// Parse `bytes=<start>-[<end>]`, clamped to the body length.
+///
+/// Returns `None` (meaning "send the whole body") for a malformed or
+/// unsatisfiable header, so a simplistic or hostile client can never widen it.
+fn parse_range(header: Option<&str>, len: usize) -> Option<(u64, u64)> {
+    if len == 0 {
+        return None;
+    }
+    let value = header?.strip_prefix("bytes=")?;
+    // A single range only; multi-range is not supported.
+    if value.contains(',') {
+        return None;
+    }
+    let (start_s, end_s) = value.split_once('-')?;
+    let start: u64 = start_s.parse().ok()?;
+    let end: u64 = if end_s.is_empty() {
+        len as u64 - 1
+    } else {
+        end_s.parse().ok()?
+    };
+    if start >= len as u64 || start > end {
+        return None;
+    }
+    Some((start, end.min(len as u64 - 1)))
 }
 
 async fn put_chunk(

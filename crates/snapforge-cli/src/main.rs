@@ -190,6 +190,40 @@ enum Command {
         max_body_mib: u64,
     },
 
+    /// Pull a snapshot from a remote HTTP endpoint into this store.
+    ///
+    /// This is the mirror of `transfer <snapshot> http://...`: it fetches the
+    /// remote manifest and every referenced chunk, resuming interrupted chunk
+    /// downloads with range requests, and publishes the snapshot atomically
+    /// once all chunks verify locally.
+    Pull {
+        /// Snapshot id to fetch.
+        snapshot: String,
+
+        /// Source endpoint, e.g. http://host:8080.
+        from: String,
+
+        /// Maximum chunk downloads in flight.
+        #[arg(long)]
+        transfer_concurrency: Option<usize>,
+
+        /// Maximum retry attempts per request.
+        #[arg(long, default_value_t = 3)]
+        max_retries: u32,
+
+        /// Bearer token for the remote endpoint (or SNAPFORGE_REMOTE_TOKEN).
+        #[arg(long)]
+        token: Option<String>,
+
+        /// Re-fetch and re-verify chunks the local store already holds.
+        #[arg(long, default_value_t = false)]
+        verify_local: bool,
+
+        /// Do not resume partially downloaded chunks with range requests.
+        #[arg(long, default_value_t = false)]
+        no_resume: bool,
+    },
+
     /// Extract a stored snapshot's artifacts back to a directory.
     ///
     /// This reassembles the snapshot's files from content-addressed storage,
@@ -358,6 +392,24 @@ fn main() -> anyhow::Result<()> {
             token,
             max_body_mib,
         } => run_serve(&cfg, &bind, token, max_body_mib),
+        Command::Pull {
+            snapshot,
+            from,
+            transfer_concurrency,
+            max_retries,
+            token,
+            verify_local,
+            no_resume,
+        } => run_remote_pull(
+            &cfg,
+            &snapshot,
+            &from,
+            transfer_concurrency,
+            max_retries,
+            token,
+            verify_local,
+            no_resume,
+        ),
         Command::Extract {
             snapshot,
             output,
@@ -1191,12 +1243,14 @@ fn run_remote_push(
             snapforge_storage::Cas::open(cfg.cas_dir())
                 .map_err(|e| anyhow::anyhow!("opening source CAS: {e}"))?,
         );
-        let opts = snapforge_remote::RemoteOptions {
+        let opts = snapforge_remote::PushOptions {
             concurrency: transfer_concurrency.unwrap_or(cfg.concurrency),
-            max_retries,
-            token,
             verify_existing: verify_remote,
-            ..snapforge_remote::RemoteOptions::default()
+            session: snapforge_remote::RemoteSession {
+                max_retries,
+                token,
+                ..snapforge_remote::RemoteSession::default()
+            },
         };
 
         let outcome =
@@ -1229,6 +1283,88 @@ fn run_remote_push(
             println!("  bytes uploaded:  {}", outcome.bytes_transferred);
             println!("  retries:         {}", outcome.retries);
             println!("  duration:        {} ms", outcome.duration_ms);
+        }
+        Ok::<(), anyhow::Error>(())
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_remote_pull(
+    cfg: &Config,
+    snapshot: &str,
+    endpoint: &str,
+    transfer_concurrency: Option<usize>,
+    max_retries: u32,
+    token: Option<String>,
+    verify_local: bool,
+    no_resume: bool,
+) -> anyhow::Result<()> {
+    let token = token.or_else(|| std::env::var("SNAPFORGE_REMOTE_TOKEN").ok());
+
+    let dest_cas_dir = cfg.cas_dir();
+    let dest_snapshots = cfg.snapshots_dir();
+    let dest_staging = cfg.staging_dir();
+    for d in [&dest_cas_dir, &dest_snapshots, &dest_staging] {
+        std::fs::create_dir_all(d).map_err(|e| anyhow::anyhow!("creating {}: {e}", d.display()))?;
+    }
+
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(async {
+        let dest_cas = std::sync::Arc::new(
+            snapforge_storage::Cas::open(&dest_cas_dir)
+                .map_err(|e| anyhow::anyhow!("opening destination CAS: {e}"))?,
+        );
+        let opts = snapforge_remote::PullOptions {
+            concurrency: transfer_concurrency.unwrap_or(cfg.concurrency),
+            resume_partial: !no_resume,
+            verify_local,
+            session: snapforge_remote::RemoteSession {
+                max_retries,
+                token,
+                ..snapforge_remote::RemoteSession::default()
+            },
+        };
+
+        let outcome = snapforge_remote::pull_snapshot(
+            endpoint,
+            snapshot,
+            dest_cas,
+            &dest_snapshots,
+            &dest_staging,
+            opts,
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("remote pull failed: {e}"))?;
+
+        if cfg.json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "snapshot": outcome.snapshot_id,
+                    "transport": "http",
+                    "endpoint": outcome.endpoint,
+                    "destination": outcome.destination.display().to_string(),
+                    "chunks_total": outcome.chunks_total,
+                    "chunks_downloaded": outcome.chunks_downloaded,
+                    "chunks_skipped": outcome.chunks_skipped,
+                    "chunks_resumed": outcome.chunks_resumed,
+                    "bytes_transferred": outcome.bytes_transferred,
+                    "retries": outcome.retries,
+                    "duration_ms": outcome.duration_ms,
+                }))?
+            );
+        } else {
+            println!("pulled snapshot: {}", outcome.snapshot_id);
+            println!("  transport:         http");
+            println!("  endpoint:          {}", outcome.endpoint);
+            println!("  destination:       {}", outcome.destination.display());
+            println!("  chunks total:      {}", outcome.chunks_total);
+            println!("  chunks downloaded: {}", outcome.chunks_downloaded);
+            println!("  chunks skipped:    {}", outcome.chunks_skipped);
+            println!("  chunks resumed:    {}", outcome.chunks_resumed);
+            println!("  bytes downloaded:  {}", outcome.bytes_transferred);
+            println!("  retries:           {}", outcome.retries);
+            println!("  duration:          {} ms", outcome.duration_ms);
         }
         Ok::<(), anyhow::Error>(())
     })

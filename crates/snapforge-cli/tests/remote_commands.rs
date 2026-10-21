@@ -62,6 +62,87 @@ fn start_server(store: PathBuf, token: Option<&str>) -> SocketAddr {
 }
 
 #[test]
+fn remote_pull_fetches_and_extracts_byte_for_byte() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    let served = tmp.path().join("served");
+    let dst = tmp.path().join("dst");
+    let restored = tmp.path().join("restored");
+    std::fs::create_dir_all(&src).unwrap();
+    write_file(&src, "core.img", 250_000, 3);
+    write_file(&src, "mm.img", 120_000, 8);
+
+    let bin = snapforge_bin();
+    store_snapshot(&bin, &served, &src, "snap");
+    let addr = start_server(served.clone(), None);
+    let endpoint = format!("http://{addr}");
+
+    let out = Command::new(&bin)
+        .args([
+            "--store",
+            dst.to_str().unwrap(),
+            "--json",
+            "pull",
+            "snap",
+            &endpoint,
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "pull failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["transport"], "http");
+    assert_eq!(v["snapshot"], "snap");
+    assert!(v["chunks_downloaded"].as_u64().unwrap() > 0);
+    assert_eq!(v["chunks_skipped"], 0);
+
+    // The pulled snapshot is complete enough to extract, byte-for-byte.
+    let extract = Command::new(&bin)
+        .args([
+            "--store",
+            dst.to_str().unwrap(),
+            "extract",
+            "snap",
+            "--output",
+            restored.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        extract.status.success(),
+        "extract failed: {}",
+        String::from_utf8_lossy(&extract.stderr)
+    );
+    for name in ["core.img", "mm.img"] {
+        assert_eq!(
+            std::fs::read(restored.join(name)).unwrap(),
+            std::fs::read(src.join(name)).unwrap(),
+            "{name}"
+        );
+    }
+
+    // A second pull is an idempotent no-op.
+    let again = Command::new(&bin)
+        .args([
+            "--store",
+            dst.to_str().unwrap(),
+            "--json",
+            "pull",
+            "snap",
+            &endpoint,
+        ])
+        .output()
+        .unwrap();
+    assert!(again.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&again.stdout).unwrap();
+    assert_eq!(v["chunks_downloaded"], 0);
+    assert_eq!(v["bytes_transferred"], 0);
+}
+
+#[test]
 fn remote_transfer_pushes_and_is_idempotent() {
     let tmp = tempfile::tempdir().unwrap();
     let src = tmp.path().join("src");
