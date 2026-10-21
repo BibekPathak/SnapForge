@@ -120,6 +120,18 @@ Legend: **ran** = executed here and passed; **skipped** = cannot run here;
 | compact | CLI compact dry run preserves the chain | 9 | ran |
 | gc | CLI gc dry run then apply | 9 | ran |
 | compact | CLI compact apply keeps the tip restorable | 9 | ran |
+| remote | push copies a snapshot; the remote extracts byte-for-byte | 10 | ran |
+| remote | push is idempotent on rerun (0 uploaded, all skipped) | 10 | ran |
+| remote | missing source chunk fails without publishing | 10 | ran |
+| remote | bearer token required when configured, accepted when supplied | 10 | ran |
+| remote | server rejects a chunk whose body does not match its id | 10 | ran |
+| remote | conflicting remote snapshot id refused | 10 | ran |
+| remote | `verify_existing` repairs a corrupt remote chunk | 10 | ran |
+| remote | health reports the protocol version | 10 | ran |
+| remote | endpoint normalization + option validation (unit) | 10 | ran |
+| remote | protocol helpers + constant-time compare (unit) | 10 | ran |
+| remote | CLI remote push + idempotent rerun | 10 | ran |
+| remote | CLI remote auth failure then success | 10 | ran |
 | engine | **real** CRIU capture/restore | 2 | **skipped: kernel lacks `CONFIG_CHECKPOINT_RESTORE`** |
 
 ## How to reproduce checks
@@ -160,6 +172,14 @@ python3 benchmarks/run.py --sizes 64,256 --repetitions 3 \
 cargo run -p snapforge-cli -- --store /tmp/sf-store4 transfer ckpt-1 /tmp/sf-store4b
 cargo run -p snapforge-cli -- --store /tmp/sf-store4b verify ckpt-1 --require-chunks
 
+# Remote transfer: run the server in one terminal, push from another.
+cargo run -p snapforge-cli -- --store /tmp/sf-store4b serve --bind 127.0.0.1:8080
+cargo run -p snapforge-cli -- --store /tmp/sf-store4 transfer ckpt-1 http://127.0.0.1:8080
+cargo run -p snapforge-cli -- --store /tmp/sf-store4b verify ckpt-1 --require-chunks
+# With a shared bearer token:
+cargo run -p snapforge-cli -- --store /tmp/sf-store4b serve --bind 127.0.0.1:8080 --token secret
+cargo run -p snapforge-cli -- --store /tmp/sf-store4 transfer ckpt-1 http://127.0.0.1:8080 --token secret
+
 # Extract (restore files from) a snapshot into a directory, then compare.
 cargo run -p snapforge-cli -- --store /tmp/sf-store4 extract ckpt-1 --output /tmp/sf-restored
 diff -r /path/to/artifacts /tmp/sf-restored
@@ -187,4 +207,4 @@ cargo run -p snapforge-cli -- checkpoint --pid $$ --output /tmp/sf-ckpt
 cargo run -p snapforge-cli -- restore --input /tmp/sf-ckpt
 ```
 
-Total automated tests: **141** (13 core, 18 engine, 24 format, 64 storage, 22 CLI integration; property tests are included in the format and storage totals). Benchmark result records are validated separately against `benchmarks/schemas/result.schema.json`.
+Total automated tests: **158** (13 core, 18 engine, 24 format, 64 storage, 15 remote, 24 CLI integration; property tests are included in the format and storage totals). Benchmark result records are validated separately against `benchmarks/schemas/result.schema.json`.

@@ -232,10 +232,9 @@ another (local filesystem). The module guarantees, and its tests assert:
    refused (never silently replaced).
 7. **Bounded memory.** Each worker holds at most one chunk.
 
-The implementation is local-only for now, which keeps it fully testable without
-any cloud account. An HTTP-backed adapter can be added later behind the same
-interface. Larger end-to-end transfer benchmarks (cold/warm cache, chunk size,
-concurrency) are Phase 7.
+The local implementation is fully testable without any cloud account. Phase 10
+adds an HTTP-backed adapter with the same guarantees. Larger end-to-end transfer
+benchmarks (cold/warm cache, chunk size, concurrency) are Phase 7.
 
 ## Phase 6 components
 
@@ -322,10 +321,48 @@ Both operations report `duration_ms` and machine-readable JSON. The CLI exposes
 them as `snapforge gc [--apply]` and `snapforge compact <tip> [--apply]`, so a
 destructive operation requires an explicit flag.
 
+## Phase 10 components
+
+### `snapforge-remote` (HTTP transfer adapter)
+
+The remote transport reuses the local transfer model over a small HTTP/1.1
+protocol. `snapforge serve` exposes a local store; `snapforge transfer <id>
+http://host:port` pushes a snapshot to it. The transport is deliberately plain
+HTTP — deploy it behind a TLS-terminating reverse proxy, and set a bearer token
+(`--token` or `SNAPFORGE_REMOTE_TOKEN`) when peers are not fully trusted.
+
+Protocol (all under `/v1`):
+
+| Method | Path | Semantics |
+|---|---|---|
+| `GET` | `/health` | Liveness, protocol id, version |
+| `HEAD` | `/chunks/{id}` | Does the remote already hold this chunk? |
+| `GET` | `/chunks/{id}` | Fetch a chunk (integrity-checked on read) |
+| `PUT` | `/chunks/{id}` | Store a chunk; the **server** recomputes BLAKE3 and rejects a mismatch |
+| `GET` | `/snapshots/{id}` | Fetch a published manifest |
+| `PUT` | `/snapshots/{id}` | Publish a manifest after checking every referenced chunk exists |
+
+Client guarantees mirror local transfer: bounded concurrency, source chunks
+read through the CAS (integrity verified), idempotent skipping via `HEAD`,
+bounded retries with backoff on network/5xx/429 errors, cancellation, and the
+manifest sent only after all chunks are accepted. A remote that already holds
+the same snapshot id yields a no-op; a *different* snapshot with the same id is
+refused with a conflict. `--verify-remote` additionally fetches and hashes
+chunks the remote claims to have, and repairs a corrupt remote chunk by
+re-uploading it (the server verifies an existing file before deduplicating).
+
+Server guarantees: every `PUT /chunks` body is hashed and must match its URL id;
+manifest publication validates structure, integrity, and chunk availability and
+is atomic (`staging` + `rename`); an existing identical snapshot is an idempotent
+success, while a different or invalid one is never overwritten. Request bodies
+are size-limited (`--max-body-mib`).
+
 ## Later phases (planned)
 
-- **Remote transfer**: an HTTP-backed adapter behind the existing
-  `transfer_snapshot` interface (local filesystem only today).
+- **Remote pull / ranged resume**: fetch a snapshot from a remote store and
+  resume partially transferred chunks with HTTP range requests.
+- **TLS and richer auth**: terminate TLS in-process and support scoped tokens
+  or mTLS instead of a single shared bearer token.
 
 ## Concurrency and memory model (design intent)
 

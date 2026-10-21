@@ -20,6 +20,7 @@ snapforge-core.workspace = true
 snapforge-engine.workspace = true
 snapforge-format.workspace = true
 snapforge-storage.workspace = true
+snapforge-remote.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]

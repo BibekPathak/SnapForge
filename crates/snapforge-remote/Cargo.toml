@@ -1,0 +1,23 @@
+[package]
+name = "snapforge-remote"
+description = "HTTP transport adapter for SnapForge snapshot transfer."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+axum = "0.8"
+reqwest = { version = "0.12", default-features = false }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+blake3.workspace = true
+tokio.workspace = true
+snapforge-format.workspace = true
+snapforge-storage.workspace = true
+
+[dev-dependencies]
+tempfile = "3.20.0"

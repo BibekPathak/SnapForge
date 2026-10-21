@@ -5,6 +5,7 @@ members = [
     "crates/snapforge-engine",
     "crates/snapforge-format",
     "crates/snapforge-storage",
+    "crates/snapforge-remote",
     "crates/snapforge-cli",
     "workloads/cpu-memory",
     "workloads/file-heavy",
@@ -28,7 +29,7 @@ tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter", "json"] }
 clap = { version = "4.5.40", features = ["derive"] }
 blake3 = "1.8.2"
-tokio = { version = "1.45.1", features = ["rt-multi-thread", "fs", "io-util", "sync", "macros", "time", "process", "signal"] }
+tokio = { version = "1.45.1", features = ["rt-multi-thread", "fs", "io-util", "sync", "macros", "time", "process", "signal", "net"] }
 libc = "0.2.172"
 humantime = "2.2.0"
 
@@ -37,6 +38,7 @@ snapforge-core = { path = "crates/snapforge-core" }
 snapforge-engine = { path = "crates/snapforge-engine" }
 snapforge-format = { path = "crates/snapforge-format" }
 snapforge-storage = { path = "crates/snapforge-storage" }
+snapforge-remote = { path = "crates/snapforge-remote" }
 
 [profile.release]
 lto = "thin"

@@ -143,13 +143,17 @@ enum Command {
         parent: Option<String>,
     },
 
-    /// Transfer a snapshot to another store (local filesystem).
+    /// Transfer a snapshot to a local store or a remote HTTP endpoint.
+    ///
+    /// A destination starting with `http://` is pushed to a SnapForge remote
+    /// server (`snapforge serve`); anything else is treated as a local store
+    /// directory. TLS is terminated by a reverse proxy, not by SnapForge.
     Transfer {
         /// Snapshot id in the source store.
         snapshot: String,
 
-        /// Destination store directory.
-        dest: PathBuf,
+        /// Destination store directory, or an http:// endpoint.
+        dest: String,
 
         /// Maximum chunk copies in flight.
         #[arg(long)]
@@ -158,6 +162,32 @@ enum Command {
         /// Maximum retry attempts per chunk.
         #[arg(long, default_value_t = 3)]
         max_retries: u32,
+
+        /// Bearer token for a remote endpoint (or SNAPFORGE_REMOTE_TOKEN).
+        #[arg(long)]
+        token: Option<String>,
+
+        /// Re-fetch and hash chunks the remote reports as already present.
+        #[arg(long, default_value_t = false)]
+        verify_remote: bool,
+    },
+
+    /// Serve a store over the HTTP transfer protocol.
+    ///
+    /// This is the receiving side of `transfer <snapshot> http://...`. It is
+    /// plain HTTP; terminate TLS at a reverse proxy when exposing it.
+    Serve {
+        /// Address to bind (host:port).
+        #[arg(long, default_value = "127.0.0.1:8080")]
+        bind: String,
+
+        /// Require this bearer token (or SNAPFORGE_REMOTE_TOKEN).
+        #[arg(long)]
+        token: Option<String>,
+
+        /// Maximum accepted request body, in MiB.
+        #[arg(long, default_value_t = 32)]
+        max_body_mib: u64,
     },
 
     /// Extract a stored snapshot's artifacts back to a directory.
@@ -308,7 +338,22 @@ fn main() -> anyhow::Result<()> {
             dest,
             transfer_concurrency,
             max_retries,
-        } => run_transfer(&cfg, &snapshot, &dest, transfer_concurrency, max_retries),
+            token,
+            verify_remote,
+        } => run_transfer(
+            &cfg,
+            &snapshot,
+            &dest,
+            transfer_concurrency,
+            max_retries,
+            token,
+            verify_remote,
+        ),
+        Command::Serve {
+            bind,
+            token,
+            max_body_mib,
+        } => run_serve(&cfg, &bind, token, max_body_mib),
         Command::Extract {
             snapshot,
             output,
@@ -1025,10 +1070,25 @@ fn now_rfc3339() -> String {
 fn run_transfer(
     cfg: &Config,
     snapshot: &str,
-    dest: &std::path::Path,
+    dest: &str,
     transfer_concurrency: Option<usize>,
     max_retries: u32,
+    token: Option<String>,
+    verify_remote: bool,
 ) -> anyhow::Result<()> {
+    if dest.starts_with("http://") || dest.starts_with("https://") {
+        return run_remote_push(
+            cfg,
+            snapshot,
+            dest,
+            transfer_concurrency,
+            max_retries,
+            token,
+            verify_remote,
+        );
+    }
+    let dest = std::path::Path::new(dest);
+
     // Source layout is the current store.
     let source_snapshots = cfg.snapshots_dir();
     if !source_snapshots.join(snapshot).is_dir() {
@@ -1102,6 +1162,138 @@ fn run_transfer(
 }
 
 /// Reconstruct a snapshot's artifacts onto the filesystem.
+#[allow(clippy::too_many_arguments)]
+fn run_remote_push(
+    cfg: &Config,
+    snapshot: &str,
+    endpoint: &str,
+    transfer_concurrency: Option<usize>,
+    max_retries: u32,
+    token: Option<String>,
+    verify_remote: bool,
+) -> anyhow::Result<()> {
+    let source_snapshots = cfg.snapshots_dir();
+    if !source_snapshots.join(snapshot).is_dir() {
+        anyhow::bail!(
+            "snapshot `{snapshot}` not found under {}",
+            source_snapshots.display()
+        );
+    }
+    let token = token.or_else(|| std::env::var("SNAPFORGE_REMOTE_TOKEN").ok());
+
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(async {
+        let cas = std::sync::Arc::new(
+            snapforge_storage::Cas::open(cfg.cas_dir())
+                .map_err(|e| anyhow::anyhow!("opening source CAS: {e}"))?,
+        );
+        let opts = snapforge_remote::RemoteOptions {
+            concurrency: transfer_concurrency.unwrap_or(cfg.concurrency),
+            max_retries,
+            token,
+            verify_existing: verify_remote,
+            ..snapforge_remote::RemoteOptions::default()
+        };
+
+        let outcome =
+            snapforge_remote::push_snapshot(cas, &source_snapshots, endpoint, snapshot, opts)
+                .await
+                .map_err(|e| anyhow::anyhow!("remote transfer failed: {e}"))?;
+
+        if cfg.json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "snapshot": outcome.snapshot_id,
+                    "transport": "http",
+                    "endpoint": outcome.endpoint,
+                    "chunks_total": outcome.chunks_total,
+                    "chunks_uploaded": outcome.chunks_uploaded,
+                    "chunks_skipped": outcome.chunks_skipped,
+                    "bytes_transferred": outcome.bytes_transferred,
+                    "retries": outcome.retries,
+                    "duration_ms": outcome.duration_ms,
+                }))?
+            );
+        } else {
+            println!("transferred snapshot: {}", outcome.snapshot_id);
+            println!("  transport:       http");
+            println!("  endpoint:        {}", outcome.endpoint);
+            println!("  chunks total:    {}", outcome.chunks_total);
+            println!("  chunks uploaded: {}", outcome.chunks_uploaded);
+            println!("  chunks skipped:  {}", outcome.chunks_skipped);
+            println!("  bytes uploaded:  {}", outcome.bytes_transferred);
+            println!("  retries:         {}", outcome.retries);
+            println!("  duration:        {} ms", outcome.duration_ms);
+        }
+        Ok::<(), anyhow::Error>(())
+    })
+}
+
+fn run_serve(
+    cfg: &Config,
+    bind: &str,
+    token: Option<String>,
+    max_body_mib: u64,
+) -> anyhow::Result<()> {
+    let addr: std::net::SocketAddr = bind
+        .parse()
+        .map_err(|e| anyhow::anyhow!("invalid --bind address `{bind}`: {e}"))?;
+    let token = token.or_else(|| std::env::var("SNAPFORGE_REMOTE_TOKEN").ok());
+    let max_body_bytes = usize::try_from(max_body_mib)
+        .ok()
+        .and_then(|mib| mib.checked_mul(1024 * 1024))
+        .filter(|bytes| *bytes > 0)
+        .ok_or_else(|| anyhow::anyhow!("--max-body-mib is out of range"))?;
+
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(async {
+        let listener = tokio::net::TcpListener::bind(addr)
+            .await
+            .map_err(|e| anyhow::anyhow!("failed to bind {addr}: {e}"))?;
+        let local = listener
+            .local_addr()
+            .map_err(|e| anyhow::anyhow!("failed to read bound address: {e}"))?;
+
+        let mut opts = snapforge_remote::ServerOptions::new(cfg.store_dir.clone());
+        opts.token = token.clone();
+        opts.max_body_bytes = max_body_bytes;
+
+        if cfg.json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "serving": true,
+                    "address": local.to_string(),
+                    "store": cfg.store_dir.display().to_string(),
+                    "protocol": snapforge_remote::PROTOCOL_VERSION,
+                    "auth": token.is_some(),
+                }))?
+            );
+        } else {
+            println!(
+                "serving {} on http://{local}",
+                snapforge_remote::PROTOCOL_VERSION
+            );
+            println!("  store: {}", cfg.store_dir.display());
+            println!(
+                "  auth:  {}",
+                if token.is_some() {
+                    "bearer token required"
+                } else {
+                    "none"
+                }
+            );
+            println!("  note:  plain HTTP; terminate TLS at a reverse proxy");
+        }
+
+        snapforge_remote::serve(listener, opts)
+            .await
+            .map_err(|e| anyhow::anyhow!("server error: {e}"))?;
+        Ok::<(), anyhow::Error>(())
+    })
+}
+
 fn run_extract(
     cfg: &Config,
     snapshot: &str,

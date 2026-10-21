@@ -50,7 +50,8 @@ impl CancellationToken {
         self.flag.load(Ordering::SeqCst)
     }
 
-    pub(crate) fn check(&self) -> Result<()> {
+    /// Return an error if cancellation has been requested.
+    pub fn check(&self) -> Result<()> {
         if self.is_cancelled() {
             Err(StorageError::Other("transfer cancelled".into()))
         } else {
