@@ -441,10 +441,41 @@ crypto provider so no external `openssl`/`cmake` toolchain is needed.
   (`SNAPFORGE_REMOTE_AUTH`), and `serve` reports the scheme, TLS mode, and auth
   state on startup.
 
+## Phase 14 components
+
+### Mutual TLS and token management
+
+Phase 13 gave the transport TLS and scoped tokens; Phase 14 makes the identity
+of **both** ends verifiable and lets credentials be rotated.
+
+**Mutual TLS.** `TlsServerConfig::client_ca_pem` (CLI `--client-ca`) requires a
+client certificate signed by that CA. The server builds a
+`rustls::server::WebPkiClientVerifier` from it, so a handshake without a valid
+client certificate is rejected before any HTTP is served. The client presents
+its identity via `TlsClientConfig::identity_pem` / `identity_key_pem` (CLI
+`--client-cert` / `--client-key`). On a successful handshake the server logs the
+client certificate's BLAKE3 fingerprint (`certificate_fingerprint`) — a stable,
+non-secret identifier that avoids both an X.509 parser dependency and logging
+the certificate itself. mTLS composes with bearer tokens: the certificate
+establishes *who*, the token establishes *what*.
+
+**Token expiry and rotation.** Each `TokenSet` entry now carries an optional
+`expires_at` (Unix seconds):
+
+- `TokenSet::insert_with_expiry(token, scope, at)` sets an expiry;
+  `insert` replaces any existing entry, which is how rotation is expressed.
+- `TokenSet::revoke(token)` removes a token outright.
+- `TokenSet::prune_expired(now)` drops expired entries.
+- The spec string accepts `token[:scope[:expiry]]`, e.g.
+  `ro:read:1735689600` or `full::1735689600` (full access, expiring).
+- Expiry is checked **after** the constant-time comparison loop, so an
+  expired-but-valid token is indistinguishable by timing from an unknown one;
+  both yield `401`.
+
 ## Later phases (planned)
 
-- **mTLS and token management**: mutual TLS and per-token rotation/expiry rather
-  than static configured secrets.
+- **Federated identity**: OIDC/JWT bearer tokens with issuer and audience
+  validation, instead of static shared secrets.
 
 ## Concurrency and memory model (design intent)
 

@@ -116,6 +116,7 @@ async fn start_tls(store: &Path, tokens: TokenSet) -> (SocketAddr, JoinHandle<()
     let tls = TlsServerConfig {
         cert_pem: cert_pem.clone(),
         key_pem,
+        client_ca_pem: None,
     };
     let opts = ServerOptions::new(store).with_tokens(tokens).with_tls(tls);
     let handle = tokio::spawn(async move { serve(listener, opts).await.unwrap() });

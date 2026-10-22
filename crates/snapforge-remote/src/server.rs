@@ -271,6 +271,17 @@ async fn serve_tls(
                     return;
                 }
             };
+
+            // If mutual TLS is in effect, record which client certificate
+            // authenticated this connection. rustls has already verified it
+            // against the configured client CA.
+            let peer = tls.get_ref().1.peer_certificates().and_then(|c| c.first());
+            let client_fingerprint =
+                peer.map(|cert| crate::tls::certificate_fingerprint(cert.as_ref()));
+            if let Some(fp) = &client_fingerprint {
+                tracing::debug!(client_cert = %fp, "mutual TLS client authenticated");
+            }
+
             let io = hyper_util::rt::TokioIo::new(tls);
             let service = hyper_util::service::TowerToHyperService::new(app);
             if let Err(e) =

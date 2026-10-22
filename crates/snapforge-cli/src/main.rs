@@ -171,6 +171,14 @@ enum Command {
         #[arg(long)]
         ca_cert: Option<PathBuf>,
 
+        /// PEM client certificate chain to present (mutual TLS).
+        #[arg(long)]
+        client_cert: Option<PathBuf>,
+
+        /// PEM client private key to present (mutual TLS).
+        #[arg(long)]
+        client_key: Option<PathBuf>,
+
         /// Re-fetch and hash chunks the remote reports as already present.
         #[arg(long, default_value_t = false)]
         verify_remote: bool,
@@ -193,7 +201,8 @@ enum Command {
         #[arg(long)]
         token: Option<String>,
 
-        /// Scoped bearer tokens, e.g. `ro:read,rw:write` (or SNAPFORGE_REMOTE_AUTH).
+        /// Scoped bearer tokens, e.g. `ro:read,rw:write` or
+        /// `ro:read:1735689600` (expiry), or SNAPFORGE_REMOTE_AUTH.
         ///
         /// A bare `token` grants full access. Mutually exclusive with `--token`.
         #[arg(long)]
@@ -206,6 +215,12 @@ enum Command {
         /// PEM private key; enables in-process TLS with --tls-cert.
         #[arg(long)]
         tls_key: Option<PathBuf>,
+
+        /// PEM CA bundle; requires a client certificate signed by it (mutual TLS).
+        ///
+        /// Implies in-process TLS, so `--tls-cert`/`--tls-key` are also needed.
+        #[arg(long)]
+        client_ca: Option<PathBuf>,
 
         /// Maximum accepted request body, in MiB.
         #[arg(long, default_value_t = 32)]
@@ -240,6 +255,14 @@ enum Command {
         /// PEM CA bundle to trust for an https:// endpoint.
         #[arg(long)]
         ca_cert: Option<PathBuf>,
+
+        /// PEM client certificate chain to present (mutual TLS).
+        #[arg(long)]
+        client_cert: Option<PathBuf>,
+
+        /// PEM client private key to present (mutual TLS).
+        #[arg(long)]
+        client_key: Option<PathBuf>,
 
         /// Re-fetch and re-verify chunks the local store already holds.
         #[arg(long, default_value_t = false)]
@@ -404,6 +427,8 @@ fn main() -> anyhow::Result<()> {
             max_retries,
             token,
             ca_cert,
+            client_cert,
+            client_key,
             verify_remote,
         } => run_transfer(
             &cfg,
@@ -413,6 +438,8 @@ fn main() -> anyhow::Result<()> {
             max_retries,
             token,
             ca_cert,
+            client_cert,
+            client_key,
             verify_remote,
         ),
         Command::Serve {
@@ -421,8 +448,18 @@ fn main() -> anyhow::Result<()> {
             auth,
             tls_cert,
             tls_key,
+            client_ca,
             max_body_mib,
-        } => run_serve(&cfg, &bind, token, auth, tls_cert, tls_key, max_body_mib),
+        } => run_serve(
+            &cfg,
+            &bind,
+            token,
+            auth,
+            tls_cert,
+            tls_key,
+            client_ca,
+            max_body_mib,
+        ),
         Command::Pull {
             snapshot,
             from,
@@ -430,6 +467,8 @@ fn main() -> anyhow::Result<()> {
             max_retries,
             token,
             ca_cert,
+            client_cert,
+            client_key,
             verify_local,
             no_resume,
         } => run_remote_pull(
@@ -437,7 +476,7 @@ fn main() -> anyhow::Result<()> {
             &snapshot,
             &from,
             transfer_concurrency,
-            remote_session(token, ca_cert, max_retries)?,
+            remote_session(token, ca_cert, client_cert, client_key, max_retries)?,
             verify_local,
             no_resume,
         ),
@@ -1167,10 +1206,12 @@ fn transport_label(endpoint: &str) -> &'static str {
 fn remote_session(
     token: Option<String>,
     ca_cert: Option<PathBuf>,
+    client_cert: Option<PathBuf>,
+    client_key: Option<PathBuf>,
     max_retries: u32,
 ) -> anyhow::Result<snapforge_remote::RemoteSession> {
     let token = token.or_else(|| std::env::var("SNAPFORGE_REMOTE_TOKEN").ok());
-    let tls = match ca_cert {
+    let mut tls = match ca_cert {
         Some(path) => {
             let pem = std::fs::read(&path)
                 .map_err(|e| anyhow::anyhow!("reading CA certificate {}: {e}", path.display()))?;
@@ -1178,6 +1219,16 @@ fn remote_session(
         }
         None => snapforge_remote::TlsClientConfig::default(),
     };
+    match (client_cert, client_key) {
+        (Some(cert), Some(key)) => {
+            tls = tls
+                .with_identity_files(&cert, &key)
+                .map_err(|e| anyhow::anyhow!("client identity: {e}"))?;
+        }
+        (Some(_), None) => anyhow::bail!("--client-cert requires --client-key"),
+        (None, Some(_)) => anyhow::bail!("--client-key requires --client-cert"),
+        (None, None) => {}
+    }
     Ok(snapforge_remote::RemoteSession {
         max_retries,
         token,
@@ -1195,6 +1246,8 @@ fn run_transfer(
     max_retries: u32,
     token: Option<String>,
     ca_cert: Option<PathBuf>,
+    client_cert: Option<PathBuf>,
+    client_key: Option<PathBuf>,
     verify_remote: bool,
 ) -> anyhow::Result<()> {
     if dest.starts_with("http://") || dest.starts_with("https://") {
@@ -1203,7 +1256,7 @@ fn run_transfer(
             snapshot,
             dest,
             transfer_concurrency,
-            remote_session(token, ca_cert, max_retries)?,
+            remote_session(token, ca_cert, client_cert, client_key, max_retries)?,
             verify_remote,
         );
     }
@@ -1430,6 +1483,7 @@ fn run_serve(
     auth: Option<String>,
     tls_cert: Option<PathBuf>,
     tls_key: Option<PathBuf>,
+    client_ca: Option<PathBuf>,
     max_body_mib: u64,
 ) -> anyhow::Result<()> {
     if token.is_some() && auth.is_some() {
@@ -1451,11 +1505,22 @@ fn run_serve(
     };
 
     let tls = match (tls_cert.as_ref(), tls_key.as_ref()) {
-        (Some(cert), Some(key)) => Some(
-            snapforge_remote::TlsServerConfig::from_pem_files(cert, key)
-                .map_err(|e| anyhow::anyhow!("TLS configuration: {e}"))?,
-        ),
-        (None, None) => None,
+        (Some(cert), Some(key)) => {
+            let mut cfg = snapforge_remote::TlsServerConfig::from_pem_files(cert, key)
+                .map_err(|e| anyhow::anyhow!("TLS configuration: {e}"))?;
+            if let Some(ca) = client_ca.as_ref() {
+                cfg = cfg
+                    .with_client_ca_file(ca)
+                    .map_err(|e| anyhow::anyhow!("mutual TLS configuration: {e}"))?;
+            }
+            Some(cfg)
+        }
+        (None, None) => {
+            if client_ca.is_some() {
+                anyhow::bail!("--client-ca requires --tls-cert and --tls-key");
+            }
+            None
+        }
         _ => anyhow::bail!("--tls-cert and --tls-key must be given together"),
     };
 
@@ -1480,6 +1545,11 @@ fn run_serve(
         opts.tls = tls;
 
         let scheme = if opts.tls.is_some() { "https" } else { "http" };
+        let mtls = opts
+            .tls
+            .as_ref()
+            .map(|t| t.requires_client_cert())
+            .unwrap_or(false);
         if cfg.json {
             println!(
                 "{}",
@@ -1491,6 +1561,7 @@ fn run_serve(
                     "protocol": snapforge_remote::PROTOCOL_VERSION,
                     "auth": if tokens.is_empty() { "none".to_string() } else { format!("{} token(s)", tokens.len()) },
                     "tls": opts.tls.is_some(),
+                    "mutual_tls": mtls,
                 }))?
             );
         } else {
@@ -1510,7 +1581,11 @@ fn run_serve(
             println!(
                 "  tls:   {}",
                 if opts.tls.is_some() {
-                    "in-process (rustls)"
+                    if mtls {
+                        "in-process (rustls, mutual: client certificate required)"
+                    } else {
+                        "in-process (rustls)"
+                    }
                 } else {
                     "off (terminate TLS at a reverse proxy)"
                 }

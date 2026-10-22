@@ -26,7 +26,7 @@ mod pull;
 mod server;
 mod tls;
 
-pub use auth::{Scope, TokenSet};
+pub use auth::{now_unix, Scope, TokenEntry, TokenSet};
 pub use client::{
     fetch_manifest, health, push_snapshot, PushOptions, PushOutcome, RemoteOptions, RemoteOutcome,
 };
@@ -36,5 +36,6 @@ pub use protocol::{chunk_url, health_url, is_hex64, snapshot_url, PROTOCOL_VERSI
 pub use pull::{new_cancellation, pull_snapshot, verify_pulled, PullOptions, PullOutcome};
 pub use server::{serve, ServerOptions, DEFAULT_MAX_BODY_BYTES};
 pub use tls::{
-    ensure_crypto_provider as install_crypto_provider, is_https, TlsClientConfig, TlsServerConfig,
+    certificate_fingerprint, ensure_crypto_provider as install_crypto_provider, is_https,
+    TlsClientConfig, TlsServerConfig,
 };

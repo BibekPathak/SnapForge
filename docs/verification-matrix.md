@@ -156,6 +156,19 @@ Legend: **ran** = executed here and passed; **skipped** = cannot run here;
 | auth | read does not imply write; write implies read (unit) | 13 | ran |
 | auth | scoped token spec parsing (unit) | 13 | ran |
 | auth | CLI push respects scoped auth | 13 | ran |
+| mtls | mutual TLS push + pull round trip | 14 | ran |
+| mtls | mutual TLS rejects a client with no certificate | 14 | ran |
+| mtls | mTLS composes with bearer tokens | 14 | ran |
+| mtls | malformed client CA rejected (unit) | 14 | ran |
+| mtls | client-identity detection (unit) | 14 | ran |
+| mtls | certificate fingerprint is stable (unit) | 14 | ran |
+| tokens | expired token rejected over the wire | 14 | ran |
+| tokens | expiry enforced at/after the deadline (unit) | 14 | ran |
+| tokens | non-expiring token ignores time (unit) | 14 | ran |
+| tokens | spec parsing supports scope and expiry (unit) | 14 | ran |
+| tokens | revoke removes a token (unit) | 14 | ran |
+| tokens | prune_expired drops only expired (unit) | 14 | ran |
+| tokens | reinserting a token rotates its scope (unit) | 14 | ran |
 | engine | **real** CRIU capture/restore | 2 | **skipped: kernel lacks `CONFIG_CHECKPOINT_RESTORE`** |
 
 ## How to reproduce checks
@@ -218,6 +231,16 @@ cargo run -p snapforge-cli -- --store /tmp/sf-store4b serve --bind 127.0.0.1:844
 cargo run -p snapforge-cli -- --store /tmp/sf-store4c pull ckpt-1 https://127.0.0.1:8443 \
     --token secret --ca-cert cert.pem
 
+# Mutual TLS: the server requires a client certificate signed by --client-ca.
+cargo run -p snapforge-cli -- --store /tmp/sf-store4b serve --bind 127.0.0.1:8443 \
+    --tls-cert cert.pem --tls-key key.pem --client-ca ca.pem --auth ro:read,rw:write
+cargo run -p snapforge-cli -- --store /tmp/sf-store4c pull ckpt-1 https://127.0.0.1:8443 \
+    --token rw --ca-cert ca.pem --client-cert client.pem --client-key client-key.pem
+
+# Tokens can carry an expiry (Unix seconds) so credentials can be rotated.
+cargo run -p snapforge-cli -- --store /tmp/sf-store4b serve --bind 127.0.0.1:8080 \
+    --auth 'ro:read:1735689600,rw:write' 
+
 # Extract (restore files from) a snapshot into a directory, then compare.
 cargo run -p snapforge-cli -- --store /tmp/sf-store4 extract ckpt-1 --output /tmp/sf-restored
 diff -r /path/to/artifacts /tmp/sf-restored
@@ -249,4 +272,4 @@ cargo run -p snapforge-cli -- checkpoint --pid $$ --output /tmp/sf-ckpt
 cargo run -p snapforge-cli -- restore --input /tmp/sf-ckpt
 ```
 
-Total automated tests: **194** (13 core, 18 engine, 24 format, 68 storage, 41 remote, 30 CLI integration; property tests are included in the format and storage totals). Benchmark result records are validated separately against `benchmarks/schemas/result.schema.json`.
+Total automated tests: **209** (13 core, 18 engine, 24 format, 68 storage, 56 remote, 30 CLI integration; property tests are included in the format and storage totals). Benchmark result records are validated separately against `benchmarks/schemas/result.schema.json`.

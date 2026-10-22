@@ -6,7 +6,7 @@ SnapForge orchestrates **CRIU**-based process checkpoint/restore and adds a
 versioned snapshot format, content-addressed chunk storage, a bounded parallel
 transfer pipeline, and a reproducible benchmark harness.
 
-> **Status: Phase 13 complete.** The workspace, `snapforge doctor`, the
+> **Status: Phase 14 complete.** The workspace, `snapforge doctor`, the
 > deterministic workload harness, the CRIU orchestration engine
 > (`checkpoint`, `restore`, `status`), the versioned snapshot format
 > (`inspect`, `verify`), the content-addressed storage pipeline (`store`),
@@ -102,6 +102,12 @@ cargo run --release -p snapforge-cli -- --store /tmp/sf-store-b serve --bind 0.0
     --tls-cert cert.pem --tls-key key.pem --token secret
 cargo run --release -p snapforge-cli -- --store /tmp/sf-store-c pull ckpt-1 https://host:8443 \
     --token secret --ca-cert cert.pem
+
+# Mutual TLS with expiring tokens.
+cargo run --release -p snapforge-cli -- --store /tmp/sf-store-b serve --bind 0.0.0.0:8443 \
+    --tls-cert cert.pem --tls-key key.pem --client-ca ca.pem --auth ro:read:1735689600,rw:write
+cargo run --release -p snapforge-cli -- --store /tmp/sf-store-c pull ckpt-1 https://host:8443 \
+    --token rw --ca-cert ca.pem --client-cert client.pem --client-key client-key.pem
 
 # Incremental: capture a child linked to a parent, then inspect/verify the chain.
 cargo run --release -p snapforge-cli -- --store /tmp/sf-store --chunk-size 65536 \
@@ -201,10 +207,11 @@ not memory-bandwidth-bound. Always record the medium alongside the numbers.
   and the lineage they carry.
 - Remote transfer runs in both directions (`transfer` push and `pull`) over
   plain HTTP or **in-process TLS** (`serve --tls-cert/--tls-key`, client
-  `--ca-cert`). Access control uses **scoped bearer tokens**: `--token` for a
-  single full-access token, or `--auth token:read,token:write` for read-only and
-  read-write peers. Tokens are shared secrets, not per-user identity; mTLS and
-  rotation are not implemented yet.
+  `--ca-cert`), with optional **mutual TLS** (`serve --client-ca`, client
+  `--client-cert`/`--client-key`). Access control uses **scoped bearer tokens**
+  (`--token`, or `--auth token:read,token:write`), each of which may carry an
+  expiry (`token:read:1735689600`). Tokens are shared secrets, not per-user
+  identity; OIDC/JWT federation is not implemented yet.
 - Storage/transfer/verification features are host-independent and are developed
   and tested regardless of CRIU availability.
 - SnapForge is **not** a sandbox or security boundary. Checkpoints may encode
