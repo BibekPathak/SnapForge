@@ -9,7 +9,11 @@ repository.workspace = true
 
 [dependencies]
 axum = "0.8"
-reqwest = { version = "0.12", default-features = false }
+hyper-util = { version = "0.1", features = ["server", "server-auto", "service", "tokio"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-manual-roots-no-provider", "json"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-pemfile = "2"
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -21,3 +25,4 @@ snapforge-storage.workspace = true
 
 [dev-dependencies]
 tempfile = "3.20.0"
+rcgen = "0.13"

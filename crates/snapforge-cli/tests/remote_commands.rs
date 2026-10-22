@@ -54,11 +54,88 @@ fn start_server(store: PathBuf, token: Option<&str>) -> SocketAddr {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             tx.send(listener.local_addr().unwrap()).unwrap();
             let mut opts = snapforge_remote::ServerOptions::new(store);
-            opts.token = token;
+            if let Some(token) = token {
+                opts = opts.with_token(token);
+            }
             snapforge_remote::serve(listener, opts).await.unwrap();
         });
     });
     rx.recv().unwrap()
+}
+
+fn start_server_scoped(store: PathBuf, tokens: snapforge_remote::TokenSet) -> SocketAddr {
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async move {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            tx.send(listener.local_addr().unwrap()).unwrap();
+            let opts = snapforge_remote::ServerOptions::new(store).with_tokens(tokens);
+            snapforge_remote::serve(listener, opts).await.unwrap();
+        });
+    });
+    rx.recv().unwrap()
+}
+
+#[test]
+fn remote_push_respects_scoped_auth() {
+    use snapforge_remote::{Scope, TokenSet};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let files = tmp.path().join("files");
+    let src = tmp.path().join("src-store");
+    let served = tmp.path().join("served");
+    std::fs::create_dir_all(&files).unwrap();
+    write_file(&files, "a.img", 120_000, 5);
+
+    let bin = snapforge_bin();
+    store_snapshot(&bin, &src, &files, "snap");
+
+    let mut tokens = TokenSet::none();
+    tokens.insert("ro", Scope::Read);
+    tokens.insert("rw", Scope::Write);
+    let addr = start_server_scoped(served.clone(), tokens);
+    let endpoint = format!("http://{addr}");
+
+    // A read-only token cannot push.
+    let denied = Command::new(&bin)
+        .args([
+            "--store",
+            src.to_str().unwrap(),
+            "transfer",
+            "snap",
+            &endpoint,
+            "--token",
+            "ro",
+        ])
+        .output()
+        .unwrap();
+    assert!(!denied.status.success(), "read token must not push");
+    assert!(
+        String::from_utf8_lossy(&denied.stderr).contains("authentication"),
+        "unexpected stderr: {}",
+        String::from_utf8_lossy(&denied.stderr)
+    );
+
+    // A write token succeeds.
+    let allowed = Command::new(&bin)
+        .args([
+            "--store",
+            src.to_str().unwrap(),
+            "transfer",
+            "snap",
+            &endpoint,
+            "--token",
+            "rw",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        allowed.status.success(),
+        "write token push failed: {}",
+        String::from_utf8_lossy(&allowed.stderr)
+    );
+    assert!(served.join("snapshots").join("snap").exists());
 }
 
 #[test]

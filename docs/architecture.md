@@ -327,15 +327,16 @@ destructive operation requires an explicit flag.
 
 The remote transport reuses the local transfer model over a small HTTP/1.1
 protocol. `snapforge serve` exposes a local store; `snapforge transfer <id>
-http://host:port` pushes a snapshot to it. The transport is deliberately plain
-HTTP — deploy it behind a TLS-terminating reverse proxy, and set a bearer token
-(`--token` or `SNAPFORGE_REMOTE_TOKEN`) when peers are not fully trusted.
+http://host:port` pushes a snapshot to it. It runs over plain HTTP by default
+(ideal behind a TLS-terminating reverse proxy) or in-process TLS; see Phase 13.
+Set a bearer token (`--token`, `--auth`, or `SNAPFORGE_REMOTE_TOKEN`) when peers
+are not fully trusted.
 
 Protocol (all under `/v1`):
 
 | Method | Path | Semantics |
 |---|---|---|
-| `GET` | `/health` | Liveness, protocol id, version |
+| `GET` | `/health` | Liveness, protocol id, version (never authenticated) |
 | `HEAD` | `/chunks/{id}` | Does the remote already hold this chunk? |
 | `GET` | `/chunks/{id}` | Fetch a chunk (integrity-checked on read) |
 | `PUT` | `/chunks/{id}` | Store a chunk; the **server** recomputes BLAKE3 and rejects a mismatch |
@@ -406,13 +407,44 @@ scratch state never accumulates.
 Both directions now share one code path for retries, backoff, cancellation, and
 status classification (`snapforge-remote::http`); the direction-specific
 `PushOptions` / `PullOptions` embed a common `RemoteSession` (retries, timeout,
-token, cancellation). `RemoteOptions` / `RemoteOutcome` remain as aliases of the
-push types from Phase 10.
+token, TLS trust, cancellation). `RemoteOptions` / `RemoteOutcome` remain as
+aliases of the push types from Phase 10.
+
+## Phase 13 components
+
+### In-process TLS and scoped authorization
+
+The transport no longer requires a TLS-terminating reverse proxy, and no longer
+relies on a single all-or-nothing token.
+
+**TLS.** TLS is terminated **in-process** with `rustls`, using the `ring`
+crypto provider so no external `openssl`/`cmake` toolchain is needed.
+
+- The server ([`TlsServerConfig`]) loads a PEM certificate chain and private key
+  (`--tls-cert` / `--tls-key`) and serves the Axum router over a `tokio-rustls`
+  accept loop. A failed handshake is logged and dropped, never fatal.
+- The client ([`TlsClientConfig`]) trusts the system roots by default and accepts
+  an extra PEM CA bundle (`--ca-cert`) for a private CA or self-signed cert.
+  `accept_invalid_certs` exists for tests only.
+- Plain HTTP remains the default; the scheme in the endpoint (`http://` vs
+  `https://`) selects the behavior, and both are accepted by the client.
+
+**Scoped tokens.** [`TokenSet`] replaces the single shared token:
+
+- [`Scope::Read`] permits `GET`/`HEAD` (fetching chunks and manifests).
+- [`Scope::Write`] permits `PUT` (uploading chunks, publishing manifests), and
+  implies read.
+- Tokens are compared in constant time against every configured token, so the
+  response does not leak which token matched.
+- An empty set disables authorization (trusted network / authenticating proxy).
+- The CLI accepts `--token` (single full-access) or `--auth token:read,token:write`
+  (`SNAPFORGE_REMOTE_AUTH`), and `serve` reports the scheme, TLS mode, and auth
+  state on startup.
 
 ## Later phases (planned)
 
-- **TLS and richer auth**: terminate TLS in-process and support scoped tokens
-  or mTLS instead of a single shared bearer token.
+- **mTLS and token management**: mutual TLS and per-token rotation/expiry rather
+  than static configured secrets.
 
 ## Concurrency and memory model (design intent)
 

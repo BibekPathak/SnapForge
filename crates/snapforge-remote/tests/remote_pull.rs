@@ -94,7 +94,9 @@ async fn start_server(store: &Path, token: Option<&str>) -> (SocketAddr, JoinHan
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let mut opts = ServerOptions::new(store);
-    opts.token = token.map(String::from);
+    if let Some(token) = token {
+        opts = opts.with_token(token);
+    }
     let handle = tokio::spawn(async move {
         serve(listener, opts).await.unwrap();
     });

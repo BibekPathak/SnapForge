@@ -4,6 +4,10 @@
 //! manifest structure/integrity, refuses to overwrite a different snapshot
 //! with the same id, and publishes manifests atomically. It never trusts
 //! client-supplied hashes or paths.
+//!
+//! Access control uses scoped bearer tokens ([`crate::auth::TokenSet`]):
+//! `read` tokens may fetch, `write` tokens may also upload and publish. TLS is
+//! optional and terminated in-process ([`TlsServerConfig`]).
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -21,8 +25,10 @@ use snapforge_format::{FormatError, Manifest, ValidateOptions};
 use snapforge_storage::{Cas, StorageError};
 use tokio::net::TcpListener;
 
+use crate::auth::{Scope, TokenSet};
 use crate::error::{RemoteError, Result};
 use crate::protocol::{is_hex64, PROTOCOL_VERSION};
+use crate::tls::TlsServerConfig;
 
 /// Default maximum request body (chunks or manifest) accepted by the server.
 pub const DEFAULT_MAX_BODY_BYTES: usize = 32 * 1024 * 1024;
@@ -32,19 +38,41 @@ pub const DEFAULT_MAX_BODY_BYTES: usize = 32 * 1024 * 1024;
 pub struct ServerOptions {
     /// Root store directory (contains `cas/`, `snapshots/`, `staging/`).
     pub store_dir: PathBuf,
-    /// Optional bearer token required on every `/v1` route except health.
-    pub token: Option<String>,
+    /// Accepted bearer tokens and their scopes. Empty means authorization is
+    /// disabled (trusted network or an authenticating reverse proxy).
+    pub tokens: TokenSet,
     /// Maximum accepted request body size.
     pub max_body_bytes: usize,
+    /// Optional in-process TLS configuration. `None` serves plain HTTP.
+    pub tls: Option<TlsServerConfig>,
 }
 
 impl ServerOptions {
     pub fn new(store_dir: impl Into<PathBuf>) -> Self {
         ServerOptions {
             store_dir: store_dir.into(),
-            token: None,
+            tokens: TokenSet::none(),
             max_body_bytes: DEFAULT_MAX_BODY_BYTES,
+            tls: None,
         }
+    }
+
+    /// Require a single full-access token (Phase 10 convenience).
+    pub fn with_token(mut self, token: impl Into<String>) -> Self {
+        self.tokens = TokenSet::single(token);
+        self
+    }
+
+    /// Require the given scoped tokens.
+    pub fn with_tokens(mut self, tokens: TokenSet) -> Self {
+        self.tokens = tokens;
+        self
+    }
+
+    /// Enable in-process TLS.
+    pub fn with_tls(mut self, tls: TlsServerConfig) -> Self {
+        self.tls = Some(tls);
+        self
     }
 
     fn validate(&self) -> Result<()> {
@@ -60,7 +88,7 @@ struct AppState {
     cas: Arc<Cas>,
     snapshots: PathBuf,
     staging: PathBuf,
-    token: Option<String>,
+    tokens: TokenSet,
     max_body_bytes: usize,
     counter: Arc<AtomicU64>,
 }
@@ -78,30 +106,28 @@ impl AppState {
             cas,
             snapshots,
             staging,
-            token: opts.token.clone(),
+            tokens: opts.tokens.clone(),
             max_body_bytes: opts.max_body_bytes,
             counter: Arc::new(AtomicU64::new(0)),
         })
     }
 
-    fn authorize(&self, headers: &HeaderMap) -> std::result::Result<(), ApiError> {
-        let Some(expected) = &self.token else {
-            return Ok(());
-        };
+    /// Authorize a request for `required`, mapping failures to a 401.
+    fn authorize(&self, headers: &HeaderMap, required: Scope) -> std::result::Result<(), ApiError> {
         let presented = headers
             .get(header::AUTHORIZATION)
             .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.strip_prefix("Bearer "))
-            .unwrap_or("");
-        if constant_time_eq(presented.as_bytes(), expected.as_bytes()) {
-            Ok(())
-        } else {
-            Err(ApiError::new(
+            .and_then(|v| v.strip_prefix("Bearer "));
+        self.tokens.authorize(presented, required).map_err(|_| {
+            ApiError::new(
                 StatusCode::UNAUTHORIZED,
                 "unauthorized",
-                "missing or invalid bearer token",
-            ))
-        }
+                match required {
+                    Scope::Read => "missing or invalid token (read scope required)",
+                    Scope::Write => "invalid token or insufficient scope (write required)",
+                },
+            )
+        })
     }
 
     fn staging_for(&self, id: &str) -> PathBuf {
@@ -109,18 +135,6 @@ impl AppState {
         self.staging
             .join(format!(".incoming-{id}-{}-{n}", std::process::id()))
     }
-}
-
-/// Compare two byte strings without short-circuiting on the first difference.
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (x, y) in a.iter().zip(b) {
-        diff |= x ^ y;
-    }
-    diff == 0
 }
 
 struct ApiError {
@@ -189,11 +203,8 @@ impl From<FormatError> for ApiError {
     }
 }
 
-/// Serve the remote protocol on `listener` until the process is interrupted.
-pub async fn serve(listener: TcpListener, opts: ServerOptions) -> Result<()> {
-    opts.validate()?;
-    let state = AppState::new(&opts)?;
-    let app = Router::new()
+fn build_router(state: &AppState) -> Router {
+    Router::new()
         .route("/v1/health", get(health))
         .route(
             "/v1/chunks/{id}",
@@ -201,18 +212,76 @@ pub async fn serve(listener: TcpListener, opts: ServerOptions) -> Result<()> {
         )
         .route("/v1/snapshots/{id}", get(get_manifest).put(put_manifest))
         .with_state(state.clone())
-        .layer(DefaultBodyLimit::max(state.max_body_bytes));
+        .layer(DefaultBodyLimit::max(state.max_body_bytes))
+}
+
+/// Serve the remote protocol on `listener` until the process is interrupted.
+///
+/// Uses in-process TLS when [`ServerOptions::tls`] is set; otherwise plain HTTP.
+pub async fn serve(listener: TcpListener, opts: ServerOptions) -> Result<()> {
+    opts.validate()?;
+    let state = AppState::new(&opts)?;
+    let app = build_router(&state);
 
     tracing::info!(
         address = %listener.local_addr().map(|a| a.to_string()).unwrap_or_else(|_| "?".into()),
         store = %opts.store_dir.display(),
+        tls = opts.tls.is_some(),
+        auth = if opts.tokens.is_empty() { "none" } else { "bearer" },
         "serving snapforge remote protocol"
     );
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        .map_err(|e| RemoteError::Protocol(format!("server error: {e}")))
+    match &opts.tls {
+        None => axum::serve(listener, app)
+            .with_graceful_shutdown(shutdown_signal())
+            .await
+            .map_err(|e| RemoteError::Protocol(format!("server error: {e}"))),
+        Some(tls) => {
+            let config = tls.to_rustls()?;
+            serve_tls(listener, config, app).await;
+            Ok(())
+        }
+    }
+}
+
+/// Accept loop for the TLS listener: handshake, then serve the Axum router.
+async fn serve_tls(
+    listener: TcpListener,
+    config: Arc<tokio_rustls::rustls::ServerConfig>,
+    app: Router,
+) {
+    let acceptor = tokio_rustls::TlsAcceptor::from(config);
+    loop {
+        let (stream, _peer) = match listener.accept().await {
+            Ok(v) => v,
+            // A transient accept error should not take down the server.
+            Err(e) => {
+                tracing::warn!(error = %e, "accept failed");
+                continue;
+            }
+        };
+        let acceptor = acceptor.clone();
+        let app = app.clone();
+        tokio::spawn(async move {
+            let tls = match acceptor.accept(stream).await {
+                Ok(tls) => tls,
+                // A failed handshake is a client problem, not a server failure.
+                Err(e) => {
+                    tracing::debug!(error = %e, "TLS handshake failed");
+                    return;
+                }
+            };
+            let io = hyper_util::rt::TokioIo::new(tls);
+            let service = hyper_util::service::TowerToHyperService::new(app);
+            if let Err(e) =
+                hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new())
+                    .serve_connection(io, service)
+                    .await
+            {
+                tracing::debug!(error = %e, "connection error");
+            }
+        });
+    }
 }
 
 async fn shutdown_signal() {
@@ -232,7 +301,7 @@ async fn head_chunk(
     AxumPath(id): AxumPath<String>,
     headers: HeaderMap,
 ) -> std::result::Result<StatusCode, ApiError> {
-    state.authorize(&headers)?;
+    state.authorize(&headers, Scope::Read)?;
     if !is_hex64(&id) || !state.cas.contains(&id) {
         return Err(ApiError::not_found(format!("chunk {id} not found")));
     }
@@ -244,7 +313,7 @@ async fn get_chunk(
     AxumPath(id): AxumPath<String>,
     headers: HeaderMap,
 ) -> std::result::Result<Response, ApiError> {
-    state.authorize(&headers)?;
+    state.authorize(&headers, Scope::Read)?;
     if !is_hex64(&id) {
         return Err(ApiError::not_found(format!("chunk {id} not found")));
     }
@@ -310,7 +379,7 @@ async fn put_chunk(
     headers: HeaderMap,
     body: Bytes,
 ) -> std::result::Result<StatusCode, ApiError> {
-    state.authorize(&headers)?;
+    state.authorize(&headers, Scope::Write)?;
     if !is_hex64(&id) {
         return Err(ApiError::bad_request(
             "chunk id must be 64 lowercase hexadecimal characters",
@@ -355,7 +424,7 @@ async fn get_manifest(
     AxumPath(id): AxumPath<String>,
     headers: HeaderMap,
 ) -> std::result::Result<Json<Manifest>, ApiError> {
-    state.authorize(&headers)?;
+    state.authorize(&headers, Scope::Read)?;
     if snapforge_format::validate_snapshot_id(&id).is_err() {
         return Err(ApiError::not_found(format!("snapshot {id} not found")));
     }
@@ -376,7 +445,7 @@ async fn put_manifest(
     headers: HeaderMap,
     body: Bytes,
 ) -> std::result::Result<StatusCode, ApiError> {
-    state.authorize(&headers)?;
+    state.authorize(&headers, Scope::Write)?;
     snapforge_format::validate_snapshot_id(&id)?;
     let manifest = snapforge_format::from_bytes(&body)?;
     if manifest.snapshot_id != id {
@@ -466,17 +535,29 @@ mod tests {
     use super::*;
 
     #[test]
-    fn constant_time_eq_matches() {
-        assert!(constant_time_eq(b"secret", b"secret"));
-        assert!(!constant_time_eq(b"secret", b"secreT"));
-        assert!(!constant_time_eq(b"secret", b"secret2"));
-        assert!(constant_time_eq(b"", b""));
-    }
-
-    #[test]
     fn server_options_reject_zero_body_limit() {
         let mut o = ServerOptions::new("/tmp/x");
         o.max_body_bytes = 0;
         assert!(o.validate().is_err());
+    }
+
+    #[test]
+    fn builders_configure_tokens_and_tls() {
+        let o = ServerOptions::new("/tmp/x").with_token("t");
+        assert_eq!(o.tokens.len(), 1);
+        assert!(o.tls.is_none());
+    }
+
+    #[test]
+    fn range_parsing_is_conservative() {
+        assert_eq!(parse_range(Some("bytes=0-"), 100), Some((0, 99)));
+        assert_eq!(parse_range(Some("bytes=10-19"), 100), Some((10, 19)));
+        // Out of bounds, malformed, and multi-range all fall back to full body.
+        assert_eq!(parse_range(Some("bytes=100-"), 100), None);
+        assert_eq!(parse_range(Some("bytes=50-10"), 100), None);
+        assert_eq!(parse_range(Some("bytes=0-1,5-6"), 100), None);
+        assert_eq!(parse_range(Some("items=0-"), 100), None);
+        assert_eq!(parse_range(None, 100), None);
+        assert_eq!(parse_range(Some("bytes=0-"), 0), None);
     }
 }

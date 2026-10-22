@@ -95,7 +95,9 @@ async fn start_server(store: &Path, token: Option<&str>) -> (SocketAddr, JoinHan
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let mut opts = ServerOptions::new(store);
-    opts.token = token.map(String::from);
+    if let Some(token) = token {
+        opts = opts.with_token(token);
+    }
     let handle = tokio::spawn(async move {
         serve(listener, opts).await.unwrap();
     });
@@ -285,6 +287,9 @@ async fn server_rejects_chunk_whose_content_does_not_match_its_id() {
     let (addr, handle) = start_server(&dst, None).await;
 
     let id = "f".repeat(64);
+    // A bare client needs a crypto provider installed for TLS support; this
+    // test only uses plain HTTP, but reqwest still requires one at build time.
+    snapforge_remote::install_crypto_provider();
     let resp = reqwest::Client::new()
         .put(format!("{}/v1/chunks/{id}", endpoint(addr)))
         .body(b"this is not the hashed content".to_vec())

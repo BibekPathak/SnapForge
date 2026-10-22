@@ -13,8 +13,9 @@ use snapforge_storage::CancellationToken;
 
 use crate::error::{RemoteError, Result};
 use crate::protocol::snapshot_url;
+use crate::tls::TlsClientConfig;
 
-/// Tuning for a remote session: retries, timeouts, auth, cancellation.
+/// Tuning for a remote session: retries, timeouts, auth, TLS, cancellation.
 ///
 /// Shared by [`crate::push_snapshot`] and [`crate::pull_snapshot`]. The
 /// direction-specific options (`PushOptions`, `PullOptions`) embed this.
@@ -28,6 +29,8 @@ pub struct RemoteSession {
     pub request_timeout: Duration,
     /// Optional bearer token sent with every request.
     pub token: Option<String>,
+    /// TLS trust configuration (used for `https://` endpoints).
+    pub tls: TlsClientConfig,
     /// Cancellation token.
     pub cancel: CancellationToken,
 }
@@ -39,6 +42,7 @@ impl Default for RemoteSession {
             retry_backoff: Duration::from_millis(50),
             request_timeout: Duration::from_secs(30),
             token: None,
+            tls: TlsClientConfig::default(),
             cancel: CancellationToken::new(),
         }
     }
@@ -55,10 +59,11 @@ impl RemoteSession {
     }
 
     pub(crate) fn client(&self) -> Result<Client> {
-        Ok(Client::builder()
+        crate::tls::ensure_crypto_provider();
+        let builder = Client::builder()
             .timeout(self.request_timeout)
-            .user_agent(concat!("snapforge-remote/", env!("CARGO_PKG_VERSION")))
-            .build()?)
+            .user_agent(concat!("snapforge-remote/", env!("CARGO_PKG_VERSION")));
+        Ok(self.tls.adds_root(builder)?.build()?)
     }
 }
 
@@ -68,15 +73,9 @@ pub(crate) fn normalize_endpoint(endpoint: &str) -> Result<String> {
     if trimmed.is_empty() {
         return Err(RemoteError::Config("endpoint must not be empty".into()));
     }
-    if trimmed.starts_with("https://") {
+    if !(trimmed.starts_with("http://") || trimmed.starts_with("https://")) {
         return Err(RemoteError::Config(
-            "TLS is not built in; expose the server over http:// behind a TLS-terminating proxy"
-                .into(),
-        ));
-    }
-    if !trimmed.starts_with("http://") {
-        return Err(RemoteError::Config(
-            "endpoint must start with http://".into(),
+            "endpoint must start with http:// or https://".into(),
         ));
     }
     Ok(trimmed.to_string())

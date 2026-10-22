@@ -167,6 +167,10 @@ enum Command {
         #[arg(long)]
         token: Option<String>,
 
+        /// PEM CA bundle to trust for an https:// endpoint.
+        #[arg(long)]
+        ca_cert: Option<PathBuf>,
+
         /// Re-fetch and hash chunks the remote reports as already present.
         #[arg(long, default_value_t = false)]
         verify_remote: bool,
@@ -174,16 +178,34 @@ enum Command {
 
     /// Serve a store over the HTTP transfer protocol.
     ///
-    /// This is the receiving side of `transfer <snapshot> http://...`. It is
-    /// plain HTTP; terminate TLS at a reverse proxy when exposing it.
+    /// This is the receiving side of `transfer <snapshot> http://...` and the
+    /// source for `pull`. Plain HTTP by default; pass `--tls-cert`/`--tls-key`
+    /// to terminate TLS in-process. Use `--token` for a single full-access
+    /// token, or `--auth` for scoped tokens (`token:read,token:write`).
     Serve {
         /// Address to bind (host:port).
         #[arg(long, default_value = "127.0.0.1:8080")]
         bind: String,
 
-        /// Require this bearer token (or SNAPFORGE_REMOTE_TOKEN).
+        /// Require this single full-access bearer token (or SNAPFORGE_REMOTE_TOKEN).
+        ///
+        /// Mutually exclusive with `--auth`.
         #[arg(long)]
         token: Option<String>,
+
+        /// Scoped bearer tokens, e.g. `ro:read,rw:write` (or SNAPFORGE_REMOTE_AUTH).
+        ///
+        /// A bare `token` grants full access. Mutually exclusive with `--token`.
+        #[arg(long)]
+        auth: Option<String>,
+
+        /// PEM certificate chain; enables in-process TLS with --tls-key.
+        #[arg(long)]
+        tls_cert: Option<PathBuf>,
+
+        /// PEM private key; enables in-process TLS with --tls-cert.
+        #[arg(long)]
+        tls_key: Option<PathBuf>,
 
         /// Maximum accepted request body, in MiB.
         #[arg(long, default_value_t = 32)]
@@ -214,6 +236,10 @@ enum Command {
         /// Bearer token for the remote endpoint (or SNAPFORGE_REMOTE_TOKEN).
         #[arg(long)]
         token: Option<String>,
+
+        /// PEM CA bundle to trust for an https:// endpoint.
+        #[arg(long)]
+        ca_cert: Option<PathBuf>,
 
         /// Re-fetch and re-verify chunks the local store already holds.
         #[arg(long, default_value_t = false)]
@@ -377,6 +403,7 @@ fn main() -> anyhow::Result<()> {
             transfer_concurrency,
             max_retries,
             token,
+            ca_cert,
             verify_remote,
         } => run_transfer(
             &cfg,
@@ -385,19 +412,24 @@ fn main() -> anyhow::Result<()> {
             transfer_concurrency,
             max_retries,
             token,
+            ca_cert,
             verify_remote,
         ),
         Command::Serve {
             bind,
             token,
+            auth,
+            tls_cert,
+            tls_key,
             max_body_mib,
-        } => run_serve(&cfg, &bind, token, max_body_mib),
+        } => run_serve(&cfg, &bind, token, auth, tls_cert, tls_key, max_body_mib),
         Command::Pull {
             snapshot,
             from,
             transfer_concurrency,
             max_retries,
             token,
+            ca_cert,
             verify_local,
             no_resume,
         } => run_remote_pull(
@@ -405,8 +437,7 @@ fn main() -> anyhow::Result<()> {
             &snapshot,
             &from,
             transfer_concurrency,
-            max_retries,
-            token,
+            remote_session(token, ca_cert, max_retries)?,
             verify_local,
             no_resume,
         ),
@@ -1122,6 +1153,39 @@ fn now_rfc3339() -> String {
     format!("{year:04}-{mth:02}-{d:02}T{h:02}:{m:02}:{s:02}Z")
 }
 
+/// A short transport label derived from an endpoint's scheme.
+fn transport_label(endpoint: &str) -> &'static str {
+    if endpoint.starts_with("https://") {
+        "https"
+    } else {
+        "http"
+    }
+}
+
+/// Build a `RemoteSession` from CLI flags, reading the token from the
+/// environment when not given and loading a CA bundle for `https://`.
+fn remote_session(
+    token: Option<String>,
+    ca_cert: Option<PathBuf>,
+    max_retries: u32,
+) -> anyhow::Result<snapforge_remote::RemoteSession> {
+    let token = token.or_else(|| std::env::var("SNAPFORGE_REMOTE_TOKEN").ok());
+    let tls = match ca_cert {
+        Some(path) => {
+            let pem = std::fs::read(&path)
+                .map_err(|e| anyhow::anyhow!("reading CA certificate {}: {e}", path.display()))?;
+            snapforge_remote::TlsClientConfig::with_ca_pem(pem)
+        }
+        None => snapforge_remote::TlsClientConfig::default(),
+    };
+    Ok(snapforge_remote::RemoteSession {
+        max_retries,
+        token,
+        tls,
+        ..snapforge_remote::RemoteSession::default()
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_transfer(
     cfg: &Config,
@@ -1130,6 +1194,7 @@ fn run_transfer(
     transfer_concurrency: Option<usize>,
     max_retries: u32,
     token: Option<String>,
+    ca_cert: Option<PathBuf>,
     verify_remote: bool,
 ) -> anyhow::Result<()> {
     if dest.starts_with("http://") || dest.starts_with("https://") {
@@ -1138,11 +1203,11 @@ fn run_transfer(
             snapshot,
             dest,
             transfer_concurrency,
-            max_retries,
-            token,
+            remote_session(token, ca_cert, max_retries)?,
             verify_remote,
         );
     }
+
     let dest = std::path::Path::new(dest);
 
     // Source layout is the current store.
@@ -1224,8 +1289,7 @@ fn run_remote_push(
     snapshot: &str,
     endpoint: &str,
     transfer_concurrency: Option<usize>,
-    max_retries: u32,
-    token: Option<String>,
+    session: snapforge_remote::RemoteSession,
     verify_remote: bool,
 ) -> anyhow::Result<()> {
     let source_snapshots = cfg.snapshots_dir();
@@ -1235,7 +1299,6 @@ fn run_remote_push(
             source_snapshots.display()
         );
     }
-    let token = token.or_else(|| std::env::var("SNAPFORGE_REMOTE_TOKEN").ok());
 
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async {
@@ -1246,11 +1309,7 @@ fn run_remote_push(
         let opts = snapforge_remote::PushOptions {
             concurrency: transfer_concurrency.unwrap_or(cfg.concurrency),
             verify_existing: verify_remote,
-            session: snapforge_remote::RemoteSession {
-                max_retries,
-                token,
-                ..snapforge_remote::RemoteSession::default()
-            },
+            session,
         };
 
         let outcome =
@@ -1263,7 +1322,7 @@ fn run_remote_push(
                 "{}",
                 serde_json::to_string_pretty(&serde_json::json!({
                     "snapshot": outcome.snapshot_id,
-                    "transport": "http",
+                    "transport": transport_label(&outcome.endpoint),
                     "endpoint": outcome.endpoint,
                     "chunks_total": outcome.chunks_total,
                     "chunks_uploaded": outcome.chunks_uploaded,
@@ -1294,13 +1353,10 @@ fn run_remote_pull(
     snapshot: &str,
     endpoint: &str,
     transfer_concurrency: Option<usize>,
-    max_retries: u32,
-    token: Option<String>,
+    session: snapforge_remote::RemoteSession,
     verify_local: bool,
     no_resume: bool,
 ) -> anyhow::Result<()> {
-    let token = token.or_else(|| std::env::var("SNAPFORGE_REMOTE_TOKEN").ok());
-
     let dest_cas_dir = cfg.cas_dir();
     let dest_snapshots = cfg.snapshots_dir();
     let dest_staging = cfg.staging_dir();
@@ -1318,11 +1374,7 @@ fn run_remote_pull(
             concurrency: transfer_concurrency.unwrap_or(cfg.concurrency),
             resume_partial: !no_resume,
             verify_local,
-            session: snapforge_remote::RemoteSession {
-                max_retries,
-                token,
-                ..snapforge_remote::RemoteSession::default()
-            },
+            session,
         };
 
         let outcome = snapforge_remote::pull_snapshot(
@@ -1341,7 +1393,7 @@ fn run_remote_pull(
                 "{}",
                 serde_json::to_string_pretty(&serde_json::json!({
                     "snapshot": outcome.snapshot_id,
-                    "transport": "http",
+                    "transport": transport_label(&outcome.endpoint),
                     "endpoint": outcome.endpoint,
                     "destination": outcome.destination.display().to_string(),
                     "chunks_total": outcome.chunks_total,
@@ -1370,16 +1422,43 @@ fn run_remote_pull(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_serve(
     cfg: &Config,
     bind: &str,
     token: Option<String>,
+    auth: Option<String>,
+    tls_cert: Option<PathBuf>,
+    tls_key: Option<PathBuf>,
     max_body_mib: u64,
 ) -> anyhow::Result<()> {
+    if token.is_some() && auth.is_some() {
+        anyhow::bail!("--token and --auth are mutually exclusive");
+    }
     let addr: std::net::SocketAddr = bind
         .parse()
         .map_err(|e| anyhow::anyhow!("invalid --bind address `{bind}`: {e}"))?;
-    let token = token.or_else(|| std::env::var("SNAPFORGE_REMOTE_TOKEN").ok());
+
+    let auth_spec = auth.or_else(|| std::env::var("SNAPFORGE_REMOTE_AUTH").ok());
+    let tokens = match (&auth_spec, &token) {
+        (Some(spec), _) => snapforge_remote::TokenSet::parse(spec)
+            .map_err(|e| anyhow::anyhow!("invalid --auth: {e}"))?,
+        (None, Some(t)) => snapforge_remote::TokenSet::single(t.clone()),
+        (None, None) => match std::env::var("SNAPFORGE_REMOTE_TOKEN") {
+            Ok(t) => snapforge_remote::TokenSet::single(t),
+            Err(_) => snapforge_remote::TokenSet::none(),
+        },
+    };
+
+    let tls = match (tls_cert.as_ref(), tls_key.as_ref()) {
+        (Some(cert), Some(key)) => Some(
+            snapforge_remote::TlsServerConfig::from_pem_files(cert, key)
+                .map_err(|e| anyhow::anyhow!("TLS configuration: {e}"))?,
+        ),
+        (None, None) => None,
+        _ => anyhow::bail!("--tls-cert and --tls-key must be given together"),
+    };
+
     let max_body_bytes = usize::try_from(max_body_mib)
         .ok()
         .and_then(|mib| mib.checked_mul(1024 * 1024))
@@ -1396,35 +1475,46 @@ fn run_serve(
             .map_err(|e| anyhow::anyhow!("failed to read bound address: {e}"))?;
 
         let mut opts = snapforge_remote::ServerOptions::new(cfg.store_dir.clone());
-        opts.token = token.clone();
+        opts.tokens = tokens.clone();
         opts.max_body_bytes = max_body_bytes;
+        opts.tls = tls;
 
+        let scheme = if opts.tls.is_some() { "https" } else { "http" };
         if cfg.json {
             println!(
                 "{}",
                 serde_json::to_string_pretty(&serde_json::json!({
                     "serving": true,
                     "address": local.to_string(),
+                    "scheme": scheme,
                     "store": cfg.store_dir.display().to_string(),
                     "protocol": snapforge_remote::PROTOCOL_VERSION,
-                    "auth": token.is_some(),
+                    "auth": if tokens.is_empty() { "none".to_string() } else { format!("{} token(s)", tokens.len()) },
+                    "tls": opts.tls.is_some(),
                 }))?
             );
         } else {
             println!(
-                "serving {} on http://{local}",
+                "serving {} on {scheme}://{local}",
                 snapforge_remote::PROTOCOL_VERSION
             );
             println!("  store: {}", cfg.store_dir.display());
             println!(
                 "  auth:  {}",
-                if token.is_some() {
-                    "bearer token required"
+                if tokens.is_empty() {
+                    "none".to_string()
                 } else {
-                    "none"
+                    format!("bearer ({} token(s))", tokens.len())
                 }
             );
-            println!("  note:  plain HTTP; terminate TLS at a reverse proxy");
+            println!(
+                "  tls:   {}",
+                if opts.tls.is_some() {
+                    "in-process (rustls)"
+                } else {
+                    "off (terminate TLS at a reverse proxy)"
+                }
+            );
         }
 
         snapforge_remote::serve(listener, opts)
